@@ -102,6 +102,7 @@ from nemo.collections.llm.gpt.model import (
     gpt_data_step,
     gpt_forward_step,
 )
+from nemo.collections.llm.t5.model import T5Config, T5Model, t5_data_step, t5_forward_step
 
 __all__ = [
     "MockDataModule",
@@ -109,6 +110,10 @@ __all__ = [
     "GPTConfig",
     "gpt_data_step",
     "gpt_forward_step",
+    "T5Model",
+    "T5Config",
+    "t5_data_step",
+    "t5_forward_step",
     "MaskedTokenLossReduction",
     "MistralConfig7B",
     "MistralNeMoConfig12B",
