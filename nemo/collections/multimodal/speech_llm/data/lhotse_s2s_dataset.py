@@ -14,7 +14,9 @@ from nemo.collections.multimodal.speech_llm.parts.utils.data_utils import (
     ceil_to_nearest,
 )
 from nemo.utils import logging
-
+from torch.nn.utils.rnn import pad_sequence
+import torch.nn.functional as F
+import ipdb
 
 def collate_vectors(items, max_length: int, padding_value):
     vectors = collate_vectors_lhotse(items, padding_value=padding_value)
@@ -756,6 +758,14 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 if len(cut_audio_list) > 0:
                     valid_cuts.append(cut)
             return valid_cuts
+        
+        def filter_cut_with_uneven_toolcalls(cuts):
+            valid_cuts = []
+            for cut in cuts:
+                function_segments = [sup for sup in cut.supervisions[1:] if sup.custom['function'] != '']
+                if len(function_segments) % 2 == 0:
+                    valid_cuts.append(cut)
+            return valid_cuts
 
         def load_audio_from_cut_fc(cuts, name, sample_rate):
             answer_audio_lens = []
@@ -851,24 +861,32 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             return answer_audios, answer_audio_lens
 
         # filter cuts that does not have source audio
-        cuts_filtered = filter_cut_with_source_audio(cuts)
+        # cuts_filtered = filter_cut_with_source_audio(cuts)
+        cuts_valid = filter_cut_with_uneven_toolcalls(cuts)
 
         # in duplex data, user channel is kept in cut.recording and agent channel is kept in cut.target_audio
         # in the following, we keep target and source audio in different sample rates to be compatible with the single-turn and multi-turn branches
         # may not be necessary in future
-        
-        if hasattr(cuts[0], "target_audios"):
+        if hasattr(cuts[0], "target_audio"):
             # 22k target audio            
             # answer_audios: [b, l]
             # answer_audio_lens: [b, max_num_answer_audios]
-            answer_audios, answer_audio_lens, features_lens = load_audio_from_cut_fc(
-                cuts_filtered, "target_audios", self.codec_sample_rate
+            # answer_audios, answer_audio_lens, features_lens = load_audio_from_cut_fc(
+            #     cuts_valid, "target_audios", self.codec_sample_rate
+            # )
+            answer_audios, answer_audio_lens, features_lens = load_audio_from_cut(
+                cuts_valid, "target_audio", self.codec_sample_rate
             )
-            
+            # import ipdb; ipdb.set_trace()
             # 16k source audio
-            audio, audio_lens = load_source_audio_from_cut_fc(
-                cuts_filtered, "source_audios", self.codec_sample_rate
-            )
+            # audio, audio_lens = load_source_audio_from_cut_fc(
+            #     cuts_valid, "source_audios", self.codec_sample_rate
+            # )
+            audio = [cut.resample(self.sample_rate).load_audio() for cut in cuts]
+            audio_lens = [torch.tensor(a.shape[1]).long() for a in audio]
+            audio = collate_vectors([a.squeeze(0) for a in audio], max_length=max(audio_lens), padding_value=0.0)
+            audio_lens = torch.tensor(audio_lens).long()
+
             
         else:
             raise ValueError(
@@ -905,6 +923,51 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                     tokens[i, : token_lengths[i], :] = inputs[i]
             return tokens, torch.LongTensor(token_lengths)
 
+        def collate_and_pad_fc(inputs, pad_id):
+            # token_lengths = [len(seq) for seq in inputs]
+            # fc_lengths = [pair.shape[1] for pair in inputs]
+            # max_length = max(fc_lengths)
+            # assert len(inputs[0].shape) < 3
+            # # if len(inputs[0].shape) < 2:
+            # if self.pad_to_max_length:
+            #     max_length = self.max_seq_length
+            # else:
+            #     max_length = min(self.max_seq_length, ceil_to_nearest(max_length, 8))
+
+            # tokens = collate_vectors(inputs, max_length=max_length, padding_value=text_pad_id)
+            # # else:
+            # #     tokens = get_3d_empty_tensor(len(inputs), max_length, text_pad_id, self.speech_pad_id)
+            # #     for i in range(len(tokens)):
+            # #         tokens[i, : token_lengths[i], :] = inputs[i]
+            # return tokens, torch.LongTensor(token_lengths)
+            return pad_sequence(inputs, batch_first=True, padding_value=pad_id)
+        
+        def collate_and_pad_fc_2d(tensors, pad_id):
+            max_rows = max(t.shape[0] for t in tensors)
+            max_cols = max(t.shape[1] for t in tensors)
+
+            # Pad each tensor to (max_rows, max_cols)
+            padded_tensors = [
+                F.pad(t, (0, max_cols - t.shape[1],  # Pad width (cols)
+                        0, max_rows - t.shape[0]),  # Pad height (rows)
+                    value=pad_id)  # Padding value
+                for t in tensors
+            ]
+
+            # Stack into a single batch
+            padded_batch = torch.stack(padded_tensors)
+            return padded_batch
+
+        def collate_and_pad_fc_1d(data, pad_id=-1):
+            # import ipdb; ipdb.set_trace()
+            max_elements = max([len(a) for a in data])
+            padded = [[pad_id for i in range(max_elements)] for j in range(len(data))]
+            for i in range(len(data)):
+                for j in range(len(data[i])):
+                    padded[i][j] = data[i][j]
+            return torch.tensor(padded)
+
+
         def get_step_by_time(text_start_time):
             text_start_step = (
                 text_start_time
@@ -915,26 +978,51 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             return int(text_start_step) - 1
 
         metadata = []
+        instruction_texts, instruction_text_lengths = [], []
         target_texts, target_text_lengths = [], []
         source_texts, source_text_lengths = [], []
         num_turns = []
         new_target_texts = []
         new_source_texts = []
-        for id, cut in enumerate(cuts):
+        # new_function_texts = []
+        
+        call_responses, call_responses_lengths = [], []
+        call_responses_times, call_responses_steps = [], []
+
+        for id, cut in enumerate(cuts_valid):
 
             def validate_time(input_time):
                 if input_time > cut.duration + 0.16:
                     logging.info(f"{input_time} > {cut.duration} in {cut}")
                 return min(input_time, cut.duration)
 
-            if not hasattr(cut, 'user_segments'):
-                raise ValueError(f"user_segments: {cut}")
+            # if not hasattr(cut, 'user_segments'):
+            #     raise ValueError(f"user_segments: {cut}")
 
-            num_turns.append(len(cut.user_segments) + len(cut.agent_segments))
+            # num_turns.append(len(cut.user_segments) + len(cut.agent_segments))
+            num_turns.append(len(cut.supervisions) - 1) # 1st supervision is system instruction
             metadata.append({'audio_filepath': cut.id + '.wav'})
+            
+            assert cut.supervisions[0].speaker == 'system'
+            instruction_segment = cut.supervisions[0]
+            user_segments = [sup for sup in cut.supervisions[1:] if sup.speaker == "User" and sup.custom['function'] == '']
+            agent_segments = [sup for sup in cut.supervisions[1:] if sup.speaker == "Assistant" and sup.custom['function'] == '']
+            function_segments = [sup for sup in cut.supervisions[1:] if sup.custom['function'] != '']
+
+            # total_steps = (
+            #     torch.ceil(
+            #         answer_audio_lens[id] / self.codec_model_downsampling_factor / self.decoder_reduction_factor
+            #     ).int()
+            #     + 1
+            # )
+            # if "glaive-functioncalling-v2+toolcall+respond_synthesized_dial_1530_turn_0_User_audio-1530" in cut.id or "glaive-functioncalling-v2+toolcall+respond_synthesized_dial_2320_turn_0_User_audio-2320" in cut.id:
+            #     import ipdb; ipdb.set_trace()
+
+            # total_audio_len = audio_lens[id].sum() + answer_audio_lens[id].sum()
             total_steps = (
                 torch.ceil(
-                    answer_audio_lens[id] / self.codec_model_downsampling_factor / self.decoder_reduction_factor
+                    answer_audio_lens[id].sum() / self.codec_model_downsampling_factor / self.decoder_reduction_factor
+                    # total_audio_len / self.codec_model_downsampling_factor / self.decoder_reduction_factor
                 ).int()
                 + 1
             )
@@ -952,7 +1040,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                 for i, segment in enumerate(segments):
                     # Extract agent text
                     pattern = r"<\|\d+\|>"
-                    output_text = re.sub(pattern, "", segment['text'])
+                    output_text = re.sub(pattern, "", segment.text) #['text'])
                     output_text = re.sub(r'\s+', ' ', output_text).strip()
                     target_text = self.text_processor._process_example(context="", output=output_text)
                     # -1 to remove the eos token added by the text processor
@@ -961,12 +1049,13 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                     )
                     target_texts.append(target_text)
                     target_text_lengths.append(target_text_length)
-                    text_start_time = segment['start']
-                    text_end_time = segment['end']
+                    text_start_time = segment.start #segment['start']
+                    text_end_time = segment.start + segment.duration #segment['end']
                     text_start_time = validate_time(text_start_time)
                     text_end_time = validate_time(text_end_time)
                     text_start_step = get_step_by_time(text_start_time)
                     text_end_step = get_step_by_time(text_end_time) + 1
+                    # import ipdb; ipdb.set_trace()
                     if text_end_step == total_steps:
                         text_end_step = total_steps - 1  # boundary case
                     elif text_end_step > total_steps:
@@ -979,15 +1068,98 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
                     cur_target_text[text_end_step] = self.text_processor.eos_id
                 return cur_target_text
 
-            cur_target_text = get_text_from_segments(cut.agent_segments, total_steps)
-            cur_source_text = get_text_from_segments(cut.user_segments, total_steps)
+            def get_text_from_segments_fc(segments): #, total_steps):
+                call_responses = []
+                call_response_lengths = []
+                call_response_times = []
+                call_response_steps = []
+
+                for i in range(0, len(segments), 2):
+                    pattern = r"<\|\d+\|>"
+                    call, response = segments[i], segments[i+1]
+                    call_response_text = " ".join([call.custom['function'], response.custom['function']])
+                    output_text = re.sub(pattern, "", call_response_text)
+                    output_text = re.sub(r'\s+', ' ', output_text).strip()
+                    target_text = self.text_processor._process_example(context="", output=output_text)
+                    # -1 to remove the eos token added by the text processor
+                    target_text, target_text_length = torch.as_tensor(target_text["answer_ids"][:-1]), torch.as_tensor(
+                        len(target_text["answer_ids"]) - 1
+                    )
+                    
+                    # target_texts.append(target_text)
+                    call_responses.append(target_text)
+                    # target_text_lengths.append(target_text_length)
+                    call_response_lengths.append(target_text_length)
+
+                    text_start_time = call.start
+                    text_start_time = validate_time(text_start_time)
+                    text_start_step = get_step_by_time(text_start_time)
+                    
+                    call_response_times.append(text_start_time)
+                    call_response_steps.append(text_start_step)
+
+                return call_responses, call_response_lengths, call_response_times, call_response_steps
+
+            def get_text_from_instruction(segment):
+                pattern = r"<\|\d+\|>"
+                output_text = re.sub(pattern, "", segment.text)
+                output_text = re.sub(r'\s+', ' ', output_text).strip()
+                target_text = self.text_processor._process_example(context="", output=output_text)
+                # -1 to remove the eos token added by the text processor
+                target_text, target_text_length = torch.as_tensor(target_text["answer_ids"][:-1]), torch.as_tensor(
+                    len(target_text["answer_ids"]) - 1
+                )
+                return target_text, target_text_length
+
+            cur_instruction_text, cur_instruction_text_length = get_text_from_instruction(instruction_segment)
+            instruction_texts.append(cur_instruction_text)
+            instruction_text_lengths.append(cur_instruction_text_length)
+
+            # cur_target_text = get_text_from_segments(cut.agent_segments, total_steps)
+            # cur_source_text = get_text_from_segments(cut.user_segments, total_steps)
+            cur_target_text = get_text_from_segments(agent_segments, total_steps)
+            cur_source_text = get_text_from_segments(user_segments, total_steps)
+            
+            # cur_function_text = get_text_from_segments_fc(function_segments, total_steps)
+            cur_call_responses, cur_call_response_lengths, cur_call_response_times, cur_call_response_steps = get_text_from_segments_fc(function_segments)
+
             new_target_texts.append(cur_target_text)
             new_source_texts.append(cur_source_text)
+            # new_function_texts.append(cur_function_text)
+            # call_responses.append(cur_call_responses)
+            call_responses.append(collate_and_pad(cur_call_responses)[0])
+            call_responses_lengths.append(cur_call_response_lengths)
+            call_responses_times.append(cur_call_response_times)
+            call_responses_steps.append(cur_call_response_steps)
+            # import ipdb; ipdb.set_trace()
+        
+        instruction_texts_merge, instruction_text_lengths = collate_and_pad(instruction_texts)
+        # import ipdb; ipdb.set_trace()
 
         target_texts_merge, target_text_lengths = collate_and_pad(new_target_texts)
         source_texts_merge, source_text_lengths = collate_and_pad(new_source_texts)
-        assert target_texts_merge.shape[0] == len(num_turns)
+        
+        # call_responses_merge, call_responses_lengths = collate_and_pad(call_responses)
+        try:
+            call_responses_merge = collate_and_pad_fc_2d(call_responses, pad_id=text_pad_id) # [b, t, l]
+        except:
+            import ipdb; ipdb.set_trace()
+        # try:
+        #     call_responses_lengths_merge = collate_and_pad_fc(torch.tensor(call_responses_lengths), pad_id=0) # [b, t]
+        # except:
+        #     import ipdb; ipdb.set_trace()
+        # call_responses_times_merge = collate_and_pad_fc(torch.tensor(call_responses_times), pad_id=-1) # [b, t]
+        # call_responses_steps_merge = collate_and_pad_fc(torch.tensor(call_responses_steps), pad_id=0) # [b, t]
+        
 
+        call_responses_lengths_merge = collate_and_pad_fc_1d(call_responses_lengths) # [b, t]
+        call_responses_times_merge = collate_and_pad_fc_1d(call_responses_times) # [b, t]
+        call_responses_steps_merge = collate_and_pad_fc_1d(call_responses_steps) # [b, t]
+        # import ipdb; ipdb.set_trace()
+
+        assert target_texts_merge.shape[0] == len(num_turns) 
+
+        # import ipdb; ipdb.set_trace()
         # note: the codec id in labels and contexts and others do not consider the offset e.g. speech_eos is 1002
         # the offset is all considered by SumVocabParallelEmbedding
         return_batch = {
@@ -996,7 +1168,8 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             "audio_signal_length": audio_lens,
             "metadata": metadata,
             # For forward
-            "instructions": None,
+            "instructions": instruction_texts_merge, #None,
+            "instructions_len": instruction_text_lengths, #None,
             "tokens": target_texts_merge,  # used in _reconfigure_and_process_inference_batch
             "target_texts_merge": target_texts_merge,  # used in prepare_llm_input
             "source_texts_merge": source_texts_merge,  # used in prepare_llm_input
@@ -1009,6 +1182,10 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             "answer_audio": answer_audios,
             "answer_audio_lens": answer_audio_lens,
             "num_turns": torch.Tensor(num_turns).long(),
+            "call_responses": call_responses_merge,
+            "call_response_lengths": call_responses_lengths_merge,
+            "call_response_times": call_responses_times_merge,
+            "call_response_steps": call_responses_steps_merge
         }
 
         return return_batch
@@ -1021,8 +1198,8 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             return self.__getitem__duplex_(cuts)
         if getattr(cuts[0], "s2s_duplex_overlap", False):
             return self.__getitem__duplex_overlap_(cuts)
-        if getattr(cuts[0], "s2s_duplex_functioncall", False):
-            return self.__getitem__duplex_functioncall_(cuts)
+        if getattr(cuts[0], "s2s_duplex_functioncalling", False):
+            return self.__getitem__duplex_functioncalling_(cuts)
 
         '''
         # half-duplex single turn s2s data and multi turn s2s data go here
