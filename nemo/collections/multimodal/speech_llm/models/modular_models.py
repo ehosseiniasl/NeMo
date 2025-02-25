@@ -1380,6 +1380,20 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
                 inference_config['inputs'] = batch
             elif 'num_audios' in batch:
                 # peft_eval.py
+                # if 'call_responses' in batch:
+                #     inference_config['inputs'] = (
+                #         batch['contexts'].cuda(),
+                #         batch['context_lengths'].cuda(),
+                #         batch['audio_signal'].cuda(),
+                #         batch['audio_signal_length'].cuda(),
+                #         batch['num_audios'].cuda(),
+                #         batch['context_start_idx'],
+                #         batch["call_responses"].cuda(),
+                #         batch["call_response_lengths"].cuda(),
+                #         batch["call_response_times"].cuda(),
+                #         batch["call_response_steps"].cuda()
+                #     )
+                # else:
                 inference_config['inputs'] = (
                     batch['contexts'].cuda(),
                     batch['context_lengths'].cuda(),
@@ -1390,12 +1404,26 @@ class ModularAudioGPTModel(SpeechLLMAdapterMixin, MegatronGPTSFTModel):
                 )
             else:
                 # peft_eval.py
-                inference_config['inputs'] = (
-                    batch['contexts'].cuda(),
-                    batch['context_lengths'].cuda(),
-                    batch['audio_signal'].cuda(),
-                    batch['audio_signal_length'].cuda(),
-                )
+                if 'call_responses' in batch:
+                    inference_config['inputs'] = (
+                        batch["instructions"].cuda(), 
+                        batch["instructions_len"].cuda(),
+                        batch['contexts'].cuda(),
+                        batch['context_lengths'].cuda(),
+                        batch['audio_signal'].cuda(),
+                        batch['audio_signal_length'].cuda(),
+                        batch["call_responses"].cuda(),
+                        batch["call_response_lengths"].cuda(),
+                        # batch["call_response_times"].cuda(),
+                        batch["call_response_steps"].cuda()
+                    )
+                else:
+                    inference_config['inputs'] = (
+                        batch['contexts'].cuda(),
+                        batch['context_lengths'].cuda(),
+                        batch['audio_signal'].cuda(),
+                        batch['audio_signal_length'].cuda(),
+                    )
             response = generate(self, **inference_config)
 
         app_state = AppState()
