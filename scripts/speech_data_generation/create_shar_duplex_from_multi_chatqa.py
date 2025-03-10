@@ -132,7 +132,7 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
                     recording_id=cut.id,
                     start=0,
                     duration=0, 
-                    text=instructions[i],
+                    text=instructions[j],
                     speaker="system", 
                     language="EN",
                 ),

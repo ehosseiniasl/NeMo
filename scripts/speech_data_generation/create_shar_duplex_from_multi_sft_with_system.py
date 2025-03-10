@@ -22,6 +22,8 @@ import ipdb
 from io import BytesIO
 import torchaudio
 
+# import lhotse
+# lhotse.audio.set_audio_backend("torchaudio")
 
 torchaudio.set_audio_backend("sox_io")
 import lhotse.audio
@@ -68,6 +70,16 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
                     is_valid = False
                 elif idx % 2 != 0 and l['from'] != 'Assistant':
                     is_valid = False
+                
+                # if audio_dir not in l['audio_value']:
+                if not l['audio_value'].startswith(audio_dir):
+                    if not os.path.isfile(os.path.join(audio_dir, l['audio_value'])):
+                        is_valid = False
+                        print(f"false {os.path.join(audio_dir, l['audio_value'])}")
+                else:
+                    if not os.path.isfile(l['audio_value']):
+                        is_valid = False
+                        print(f"false {l['audio_value']}")
 
             # print(num_user, num_assistant)
             if num_user == num_assistant and is_valid:
@@ -95,10 +107,11 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
         #     instructions.append(convs[0]["instruction"])
         # else:
         #     instructions.append("")
-        if "text_value" in convs[0]:
-            instructions.append(convs[0]["text_value"])
-        else:
-            instructions.append("")
+        # if "text_value" in convs[0]:
+        #     instructions.append(convs[0]["text_value"])
+        # else:
+        #     instructions.append("")
+        instructions.append(line['system'])
 
         # Language source
         if "lang" in convs[0]:
@@ -109,13 +122,16 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
         # Loading agent audio and using only the extracted features as nd.array
         # target_recordings.append(Recording.from_file(convs[1]['value']))
         # target_recordings.append(Recording.from_file(convs[1]['audio_value']))
-        target_recordings.append(Recording.from_file(os.path.join(audio_dir, convs[1]['audio_value'])))
+        # if audio_dir not in convs[1]['audio_value']:
+        if not convs[1]['audio_value'].startswith(audio_dir):
+            target_recordings.append(Recording.from_file(os.path.join(audio_dir, convs[1]['audio_value'])))
+        else:
+            target_recordings.append(Recording.from_file(convs[1]['audio_value']))
         
         # Agent answer transcript
         # answer_list.append(convs[1]["transcript"])
         # answer_list.append(convs[1]["text_value"])
         answer_list.append(convs[1]["value_normalized"])
-
         # Language target
         if "lang" in convs[1]:
             target_language.append(convs[1]["lang"])
@@ -123,8 +139,10 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
             target_language.append("EN")
 
     print("Done extracting data from manifest")
-    print(len(user_recordings))
+    # print(f"# user recordings: {len(user_recordings)}")
+    
     cuts = CutSet.from_manifests(recordings=RecordingSet.from_recordings(user_recordings))
+    print(f"# cuts: {len(cuts)}")
 
     unequal = 0
     # Attach text
@@ -132,6 +150,20 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
         user_audio = np.array([[]])
         agent_audio = np.array([[]])
         total_dur = 0
+        
+        # add system instruction
+        cut.supervisions.append(
+                SupervisionSegment(
+                    id=cut.id,
+                    recording_id=cut.id,
+                    start=0,
+                    duration=0, #cut.recording.duration,
+                    text=instructions[j],
+                    speaker="system", 
+                    language="EN",
+                ),
+            )
+
         # convs = in_manifest[j]["conversations"]
         convs = valid_manifest[j]["conversations"]
         for i in range(0, len(convs), 2):
@@ -223,6 +255,8 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
     print(f"unequal examples: {unequal}")
 
     print("...Making Shars")
+    print(f"# of cuts: {len(list(cuts))}")
+
     out_shar_dir = Path(out_shar_dir)
     out_shar_dir.mkdir(parents=True, exist_ok=True)
     shard_size = shard_size
@@ -267,7 +301,7 @@ def main():
     parser.add_argument(
         '--audio_dir',
         type=str,
-        default="/lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/processed_datasets",
+        default=None, #"/lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/processed_datasets",
     )
 
     args = parser.parse_args()

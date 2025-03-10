@@ -55,8 +55,11 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
     target_recordings = []
     valid_manifest = []
     for i, line in tqdm(enumerate(in_manifest)):
-        if "audio_value" in line['conversations'][0]:
+        if "audio_value" in line['conversations'][0] and "<AVAILABLE_TOOLS>" not in line['conversations'][0]['value']: # no tool instruction in 1st user turn
             valid_manifest.append(line)
+
+    print(f"num manifests: {len(in_manifest)}")
+    print(f"num valid manifests: {len(valid_manifest)}")
 
     # audio_dir = "/lustre/fsw/portfolios/llmservice/users/ehosseiniasl/digital_human_alm/data/SFT/ameya_data/synthesized/audio"
     for i, line in tqdm(enumerate(valid_manifest)):
@@ -64,7 +67,10 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
         # First element is user speech and second is agent speech
         convs = line["conversations"]
         for conv in convs:
-            conv["value"] = conv["value"].replace("fs7", "fsw")
+            if 'value' in conv:
+                conv["value"] = conv["value"].replace("fs7", "fsw")
+            if 'value_normalized' in conv:
+                conv["value_normalized"] = conv["value_normalized"].replace("fs7", "fsw")
 
         # User_Speech
         # user_recording = Recording.from_file(convs[0]['value'])
@@ -72,7 +78,10 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
         found_image = False
         for turn in convs:
             if 'audio_value' in turn:
-                conv_recording = Recording.from_file(os.path.join(audio_dir, turn['audio_value']))
+                if not turn['audio_value'].startswith("/lustre/fsw"):
+                    conv_recording = Recording.from_file(os.path.join(audio_dir, turn['audio_value']))
+                else:
+                    conv_recording = Recording.from_file(turn['audio_value'])
                 conv_recordings.append(conv_recording)
                 sample_rate = conv_recording.sampling_rate
                 found_image = True
@@ -151,7 +160,10 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
             else:
                 user_function = ""
                 user_transcript = convs[i]['value_normalized']
-                user_path = os.path.join(audio_dir, convs[i]['audio_value'])
+                if convs[i]['audio_value'].startswith("/lustre/fsw"):
+                    user_path = convs[i]['audio_value']
+                else:
+                    user_path = os.path.join(audio_dir, convs[i]['audio_value'])
                 user_duration = Recording.from_file(user_path).duration
             # ipdb.set_trace()
             
@@ -182,17 +194,24 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
             if user_duration > 0:
                 total_duration += (user_duration +turn_silence_sec)
 
-            if 'audio_value' not in convs[i+1]:
-                assistant_function = convs[i+1]['value']
-                assistant_transcript = ""
-                assistant_path = "" #np.zeros((0,0))
-                assistant_duration = 0
-            else:
-                assert 'audio_value' in convs[i+1]
-                assistant_function = ""
-                assistant_transcript = convs[i+1]['value_normalized']
-                assistant_path = os.path.join(audio_dir, convs[i+1]['audio_value'])
-                assistant_duration = Recording.from_file(assistant_path).duration
+            
+            try:
+                if 'audio_value' not in convs[i+1]:
+                    assistant_function = convs[i+1]['value']
+                    assistant_transcript = ""
+                    assistant_path = "" #np.zeros((0,0))
+                    assistant_duration = 0
+                else:
+                    assert 'audio_value' in convs[i+1]
+                    assistant_function = ""
+                    assistant_transcript = convs[i+1]['value_normalized']
+                    if convs[i+1]['audio_value'].startswith("/lustre/fsw"):
+                        assistant_path = convs[i+1]['audio_value']
+                    else:
+                        assistant_path = os.path.join(audio_dir, convs[i+1]['audio_value'])
+                    assistant_duration = Recording.from_file(assistant_path).duration
+            except:
+                import ipdb; ipdb.set_trace()
 
             cut.supervisions.append(
                 SupervisionSegment(
