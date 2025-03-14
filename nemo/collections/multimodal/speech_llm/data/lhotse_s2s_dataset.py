@@ -882,7 +882,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             # audio, audio_lens = load_source_audio_from_cut_fc(
             #     cuts_valid, "source_audios", self.codec_sample_rate
             # )
-            audio = [cut.resample(self.sample_rate).load_audio() for cut in cuts]
+            audio = [cut.resample(self.sample_rate).load_audio() for cut in cuts_valid]
             audio_lens = [torch.tensor(a.shape[1]).long() for a in audio]
             audio = collate_vectors([a.squeeze(0) for a in audio], max_length=max(audio_lens), padding_value=0.0)
             audio_lens = torch.tensor(audio_lens).long()
