@@ -1046,8 +1046,12 @@ def s2s_fc_sample_sequence_batch(
                 min_length = extra.get('min_tokens_to_generate', 0)
                 assert min_length == 0
                 # make sure it won't sample outside the vocab_size range
-                logits[:, model.cfg.s2s_vocab_size :] = -float('Inf')
-                logits = model.de_concat_multiproj_logits(logits)
+                if not hasattr(model, "share_text_system_embed") or not model.share_text_system_embed:
+                    logits[:, model.cfg.s2s_vocab_size :] = -float('Inf')
+                    logits = model.de_concat_multiproj_logits(logits)
+                else:
+                    logits[:, 2 * model.cfg.s2s_vocab_size :] = -float('Inf')
+                    logits = model.de_concat_multiproj_logits_shared(logits)
 
                 # started indicates whether the current token step passes the context_length, so we make sure not to overwrite the context tokens
                 started = audio_text_context_lengths <= context_length
@@ -1070,8 +1074,6 @@ def s2s_fc_sample_sequence_batch(
                         probs = probs.nan_to_num(1.0)
                         prev = torch.multinomial(probs, num_samples=1).view(-1)
                     return prev
-
-                # import pdb; pdb.set_trace()
 
                 prev = [get_prev(logits_i, started, temperature, extra) for logits_i in logits]
                 prev = torch.stack(prev, dim=1)

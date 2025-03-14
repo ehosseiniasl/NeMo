@@ -102,6 +102,55 @@ class SumVocabParallelEmbedding(tensor_parallel.VocabParallelEmbedding):
                 embeddings = torch.sum(embeddings, axis=2)
         return embeddings
 
+class SumVocabParallelEmbeddingFC(tensor_parallel.VocabParallelEmbedding):
+
+    def __init__(
+        self,
+        proj_head_dims,
+        include_proj=False,
+        *args,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.proj_head_dims = proj_head_dims
+        self.include_proj = include_proj
+        if include_proj:
+            self.output_proj = tensor_parallel.ColumnParallelLinear(
+                kwargs['embedding_dim'] * (len(proj_head_dims)+1),
+                output_size=kwargs['embedding_dim'],
+                config=kwargs['config'],
+                init_method=kwargs['init_method'],
+            )
+
+    def forward(self, input_):
+        # import ipdb; ipdb.set_trace()
+        if input_.ndim == 3:
+            assert input_.shape[2] == len(self.proj_head_dims) + 1
+            input_ = input_.clone()
+            for i in range(len(self.proj_head_dims) + 1):
+                if i > 1: # system+codec channel
+                    # shuold consider the offset of previous projection heads
+                    input_[:, :, i] += sum(self.proj_head_dims[:i-1]) #+ self.proj_head_dims[0]
+                # else:
+                #     # shuold consider the offset of previous projection heads
+                #     input_[:, :, i] += sum(self.proj_head_dims[:i])
+                #     input_[:, :, i] += sum(self.proj_head_dims[:0])
+
+            # import ipdb; ipdb.set_trace()
+            assert input_.max() < sum(self.proj_head_dims) + self.proj_head_dims[0]
+        # import ipdb; ipdb.set_trace()
+        embeddings = super().forward(input_)
+        
+        if input_.ndim == 3:
+            if self.include_proj:
+                new_embeddings = embeddings.reshape(embeddings.shape[0], embeddings.shape[1], -1)
+                new_embeddings, _ = self.output_proj(new_embeddings)
+                embeddings = embeddings[:, :, 0] + new_embeddings
+            else:
+                # sum the multi proj embeddings as the final embeddings
+                embeddings = torch.sum(embeddings, axis=2)
+        return embeddings
+
 
 class SumMultiEmbedding(LanguageModelEmbedding):
     """Language model embeddings with multiple tokens at each time step. The embeddings of the tokens of the same time step will be computed separately and then be summed together."""
@@ -116,6 +165,28 @@ class SumMultiEmbedding(LanguageModelEmbedding):
         super().__init__(*args, **kwargs)
         del self.word_embeddings
         self.word_embeddings = SumVocabParallelEmbedding(
+            num_embeddings=self.vocab_size,
+            embedding_dim=self.config.hidden_size,
+            init_method=self.config.init_method,
+            reduce_scatter_embeddings=self.reduce_scatter_embeddings,
+            config=self.config,
+            proj_head_dims=proj_head_dims,
+            include_proj=include_proj,
+        )
+
+class SumMultiEmbeddingFC(LanguageModelEmbedding):
+    """Language model embeddings with multiple tokens at each time step. The embeddings of the tokens of the same time step will be computed separately and then be summed together."""
+
+    def __init__(
+        self,
+        proj_head_dims,
+        include_proj=False,
+        *args,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        del self.word_embeddings
+        self.word_embeddings = SumVocabParallelEmbeddingFC(
             num_embeddings=self.vocab_size,
             embedding_dim=self.config.hidden_size,
             init_method=self.config.init_method,
@@ -164,6 +235,9 @@ class S2sMCoreGPTModel(MCoreGPTModel):
                 for i in range(self.n_proj_heads)
             ]
         )
+        if hasattr(config, "share_text_system_embed") and config.share_text_system_embed == True:
+            self.n_proj_heads += 1 # add 1 to include system channel
+            self.share_text_system_embed = config.share_text_system_embed
         # ToDo: move the speech decoder to a new class
         if self.speech_decoder_parms:
             self.b_t_f_speech_decoder_input = self.speech_decoder_parms.pop("b_t_f_input", False)
@@ -186,6 +260,30 @@ class S2sMCoreGPTModel(MCoreGPTModel):
         pretrained_emb = self.embedding
 
         self.embedding = SumMultiEmbedding(
+            config=self.config,
+            vocab_size=vocab_size,
+            max_sequence_length=self.max_sequence_length,
+            position_embedding_type=self.position_embedding_type,
+            proj_head_dims=self.proj_head_dims,
+            include_proj=include_proj,
+        )
+        self.embedding.word_embeddings.weight.data[: pretrained_emb.word_embeddings.weight.shape[0]] = (
+            pretrained_emb.word_embeddings.weight.data
+        )
+        # Zero out the new embeddings to make the model behave the same as it was pre-trained
+        self.embedding.word_embeddings.weight.data[pretrained_emb.word_embeddings.weight.shape[0] :].zero_()
+        del pretrained_emb
+        if self.pre_process or self.post_process:
+            self.setup_embeddings_and_output_layer()
+
+
+    def extend_embedding_shared(self, vocab_size: int, include_proj=False):
+        """Extend the embedding layer with new vocab size."""
+
+        # Extend word embedding table if self.padded_vocab_size is larger than the size of the pre-trained word embedding
+        pretrained_emb = self.embedding
+
+        self.embedding = SumMultiEmbeddingFC(
             config=self.config,
             vocab_size=vocab_size,
             max_sequence_length=self.max_sequence_length,
@@ -298,6 +396,7 @@ class S2sMCoreGPTModel(MCoreGPTModel):
 
             all_logits = []
             cur_dims = 0
+
             for i in range(self.n_proj_heads):
                 cur_output_weight = (
                     output_weight[cur_dims : cur_dims + self.proj_head_dims[i]] if output_weight is not None else None
@@ -342,17 +441,49 @@ class S2sMCoreGPTModel(MCoreGPTModel):
 
                 return loss
             else:
-                # if speech batch without the speeech decoder
                 all_logits = []
                 cur_dims = 0
-                for i in range(self.n_proj_heads):
-                    cur_output_weight = (
-                        output_weight[cur_dims : cur_dims + self.proj_head_dims[i]]
-                        if output_weight is not None
-                        else None
-                    )
-                    all_logits.append(self.output_layers[i](hidden_states, weight=cur_output_weight)[0])
-                    cur_dims += self.proj_head_dims[i]
+                if not hasattr(self, "share_text_system_embed") or not self.share_text_system_embed:
+                    # if speech batch without the speeech decoder
+                    for i in range(self.n_proj_heads):
+                        cur_output_weight = (
+                            output_weight[cur_dims : cur_dims + self.proj_head_dims[i]]
+                            if output_weight is not None
+                            else None
+                        )
+            
+                        all_logits.append(self.output_layers[i](hidden_states, weight=cur_output_weight)[0])
+                        cur_dims += self.proj_head_dims[i]
+                else:
+                    # if speech batch without the speeech decoder  
+                    for i in range(self.n_proj_heads):
+                        if i == 1: # system channel use text channel output_weight
+                            cur_output_weight = (
+                            output_weight[0 : self.proj_head_dims[0]]
+                            if output_weight is not None
+                            else None
+                            )
+                            all_logits.append(self.output_layers[0](hidden_states, weight=cur_output_weight)[0])
+                        else:
+                            if i > 1: # codec channels
+                                cur_output_weight = (
+                                    output_weight[cur_dims : cur_dims + self.proj_head_dims[i-1]]
+                                    if output_weight is not None
+                                    else None
+                                )
+                                cur_dims += self.proj_head_dims[i-1]
+                                all_logits.append(self.output_layers[i-1](hidden_states, weight=cur_output_weight)[0])
+                            else:   # text channel
+                                cur_output_weight = (
+                                    output_weight[cur_dims : cur_dims + self.proj_head_dims[i]]
+                                    if output_weight is not None
+                                    else None
+                                )
+                                cur_dims += self.proj_head_dims[i]
+
+                                all_logits.append(self.output_layers[i](hidden_states, weight=cur_output_weight)[0])
+
+                    # cur_dims += self.proj_head_dims[i]
                 assert self.vocab_size == self.proj_head_dims[0]
                 all_logits[0], _ = self.output_layer(
                     hidden_states, weight=output_weight[: self.vocab_size] if output_weight is not None else None
@@ -370,6 +501,7 @@ class S2sMCoreGPTModel(MCoreGPTModel):
                     ],
                     axis=2,
                 )
+                
                 tokens_loss = (
                     tokens_loss
                     * torch.FloatTensor(self.proj_head_loss_weights).to(tokens_loss.device)
@@ -477,6 +609,7 @@ class S2sMCoreGPTModelDepth(S2sMCoreGPTModel):
             output_weight = None
         all_logits = []
         cur_dims = 0
+        
         for i in range(self.n_proj_heads):
             cur_output_weight = (
                 output_weight[cur_dims : cur_dims + self.proj_head_dims[i]] if output_weight is not None else None
@@ -606,7 +739,10 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         else:
             base_model = model.model
 
-        base_model.extend_embedding(model.padded_vocab_size, include_proj=cfg.model.get('combine_emb_by_proj', False))
+        if not hasattr(cfg.model, "share_text_system_embed") or not cfg.model.get('share_text_system_embed', False):
+            base_model.extend_embedding(model.padded_vocab_size, include_proj=cfg.model.get('combine_emb_by_proj', False))
+        else:
+            base_model.extend_embedding_shared(model.padded_vocab_size, include_proj=cfg.model.get('combine_emb_by_proj', False))
         # print out params in more details
         model.summarize(max_depth=2)
 
@@ -876,6 +1012,9 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                     num_turns = []
                     max_length = 0
                     trans_new_pred_wav = []
+                    for i in start_end_time:
+                        for start, end in i:
+                            print(end - start)
                     for pred_wav, each_start_end_time in zip(pred_wavs, start_end_time):
                         if len(each_start_end_time) == 0:
                             num_turns.append(0)
@@ -892,11 +1031,11 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                                 num_turn += 1
                                 trans_new_pred_wav.append(pred_wav[start:end])
                         num_turns.append(num_turn)
-                    if len(trans_new_pred_wav) < 1:
-                        trans_new_pred_wav = pred_wavs
-                        logging.info(
-                            f"Segmented speech preds are empty, using original speech preds. {deduplicated_outputs['metadata']}"
-                        )
+                    # if len(trans_new_pred_wav) < 1:
+                    #     trans_new_pred_wav = pred_wavs
+                    #     logging.info(
+                    #         f"Segmented speech preds are empty, using original speech preds. {deduplicated_outputs['metadata']}"
+                    #     )
                     asr_batch_size = min(64, len(trans_new_pred_wav))
                     segmented_speech_preds_transcribed = asr_model.transcribe(
                         trans_new_pred_wav, batch_size=asr_batch_size
@@ -1043,7 +1182,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             # import ipdb; ipdb.set_trace()
             with torch.no_grad():
                 logging.info(f"Decoding and saving audio")
-                pred_wavs = self.decode_and_save_wavs_fc(
+                pred_wavs, start_end_time = self.decode_and_save_wavs_fc(
                     codec_model,
                     deduplicated_outputs['speech_preds'],
                     os.path.join(output_dir, "wav", "pred"),
@@ -1051,7 +1190,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                     deduplicated_outputs['inputs'],
                     deduplicated_outputs['call_response_steps']
                 )
-                answer_wavs = self.decode_and_save_wavs_fc(
+                answer_wavs, _ = self.decode_and_save_wavs_fc(
                     codec_model,
                     deduplicated_outputs['speech_answers'],
                     os.path.join(output_dir, "wav", "answer"),
@@ -1224,14 +1363,14 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             codes = replace_speech_code(codes, self.cfg.data.train_ds.speech_bos_id)
             # get end time of each turn
             end_times = get_index_of_code(codes, self.cfg.data.train_ds.speech_eos_id)
-            if len(start_times) == len(end_times) + 1:
-                end_times = torch.cat(
-                    [
-                        end_times,
-                        torch.full([1], self.get_duration_by_steps(codes.shape[1])[0], device=end_times.device),
-                    ],
-                    axis=0,
-                )
+            # if len(start_times) == len(end_times) + 1:
+            #     end_times = torch.cat(
+            #         [
+            #             end_times,
+            #             torch.full([1], self.get_duration_by_steps(codes.shape[1])[0], device=end_times.device),
+            #         ],
+            #         axis=0,
+            #     )
             end_times = end_times[: len(start_times)]
             start_times = start_times[: len(end_times)]
             start_end_time.append([(s, e) for s, e in zip(start_times, end_times)])
@@ -1239,11 +1378,11 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             codes = replace_speech_code(codes, self.cfg.data.train_ds.speech_unk_id)
             codes = replace_speech_code(codes, self.cfg.data.train_ds.speech_pad_id)
             codes = replace_speech_code(codes, self.cfg.data.train_ds.speech_nosil_id) # for function channel segments
-            # wav, _ = codec_model.decode(tokens=codes.unsqueeze(0), tokens_len=codec_len)
-            # wav = wav[0]
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                wav, _ = codec_model.decode(tokens=codes.unsqueeze(0), tokens_len=codec_len)
-            wav = wav[0].float()
+            wav, _ = codec_model.decode(tokens=codes.unsqueeze(0), tokens_len=codec_len)
+            wav = wav[0]
+            # with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            #     wav, _ = codec_model.decode(tokens=codes.unsqueeze(0), tokens_len=codec_len)
+            # wav = wav[0].float()
             wavs.append(wav)
             sf.write(
                 os.path.join(
@@ -1253,7 +1392,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 sample_rate,
             )
 
-        return wavs
+        return wavs, start_end_time
     
     def decode_and_save_wavs_fc(self, codec_model, codes_list, wav_dir, metadata_list, instruction_list, call_response_step_list):
         sample_rate = self.codec_sample_rate
@@ -1291,7 +1430,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                 sample_rate,
             )
 
-        return wavs, start_end_time
+        return wavs #, start_end_time
 
     def inference_epoch_end(self, outputs, mode, data_cfg):
         # Parent class will handle logging of the loss.
@@ -1644,8 +1783,24 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
             base_model = self.model.module
         else:
             base_model = self.model
-
+        
         for i in base_model.proj_head_dims:
+            logits_list.append(logits[:, prev : prev + i])
+            prev += i
+        return logits_list
+    
+    def de_concat_multiproj_logits_shared(self, logits):
+        logits_list = []
+        prev = 0
+
+        if self.cfg.get('megatron_amp_O2', False):
+            base_model = self.model.module
+        else:
+            base_model = self.model
+        
+        shared_proj_head_dims = [base_model.proj_head_dims[0]] * 2 + base_model.proj_head_dims[1:]
+        # for i in base_model.proj_head_dims:
+        for i in shared_proj_head_dims:
             logits_list.append(logits[:, prev : prev + i])
             prev += i
         return logits_list
@@ -2117,7 +2272,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         # encoder_input, labels, loss_mask, encoded, encoder_length = self.inject_sys_prompt(
         #     audio_batch, encoder_input, labels, loss_mask, encoded, encoder_length
         # )
-        
+
         limit_max_seq_length = self.cfg.get("limit_max_seq_length", None)
         if limit_max_seq_length is not None and limit_max_seq_length < labels.shape[1] and self.training:
             import random

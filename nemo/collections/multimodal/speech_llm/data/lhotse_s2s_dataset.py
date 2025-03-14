@@ -906,7 +906,8 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
 
         # filter cuts that does not have source audio
         # cuts_filtered = filter_cut_with_source_audio(cuts)
-        cuts_valid = filter_cut_with_uneven_toolcalls(cuts)
+        # cuts_valid = filter_cut_with_uneven_toolcalls(cuts)
+        cuts_valid = cuts
 
         # in duplex data, user channel is kept in cut.recording and agent channel is kept in cut.target_audio
         # in the following, we keep target and source audio in different sample rates to be compatible with the single-turn and multi-turn branches
