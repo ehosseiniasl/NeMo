@@ -38,6 +38,13 @@ def json_reader(filename):
             yield json.loads(line)
 
 
+def num_function_turns(data):
+    c = 0
+    for d in data:
+        if "<TOOLCALL>" in d['value'] or "<TOOL_RESPONSE>" in d['value']:
+            c += 1
+    return c
+
 def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, overlap_sec=0.64):
     in_manifest = list(json_reader(manifest))
     print(f"...loaded {manifest} # of datapoints {len(in_manifest)}")
@@ -56,7 +63,10 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
     valid_manifest = []
     for i, line in tqdm(enumerate(in_manifest)):
         if "audio_value" in line['conversations'][0] and "<AVAILABLE_TOOLS>" not in line['conversations'][0]['value']: # no tool instruction in 1st user turn
-            valid_manifest.append(line)
+            fc_calls = num_function_turns(line['conversations'])
+            print (i, fc_calls)
+            if fc_calls % 2 == 0:
+                valid_manifest.append(line)
 
     print(f"num manifests: {len(in_manifest)}")
     print(f"num valid manifests: {len(valid_manifest)}")
@@ -320,6 +330,7 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
 
     print(f"unequal examples: {unequal}")
 
+
     print("...Making Shars")
     out_shar_dir = Path(out_shar_dir)
     out_shar_dir.mkdir(parents=True, exist_ok=True)
@@ -335,7 +346,30 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
     # exported = cuts.to_shar(out_shar_dir, fields={"source_audio": "wav", "target_audio": "wav"}, num_jobs=1, shard_size=shard_size)
     # print(f"...share created")
     
-    exported = cuts.to_shar(out_shar_dir, fields={}, num_jobs=1, shard_size=shard_size)
+    # def filter_cut_with_uneven_toolcalls(cuts):
+    #     valid_cuts = []
+    #     for cut in cuts:
+    #         function_segments = [sup for sup in cut.supervisions[1:] if sup.custom['function'] != '']
+    #         if len(function_segments) % 2 == 0:
+    #             valid_cuts.append(cut)
+    #     return valid_cuts
+
+    # valid_cuts = filter_cut_with_uneven_toolcalls(cuts)
+    valid_cuts_list = []
+    for cut in cuts:
+        try:
+            if cut.load_audio() is not None:
+                valid_cuts_list.append(cut)
+        except:
+            continue
+    valid_cuts = CutSet.from_cuts(valid_cuts_list)
+    # valid_cuts = CutSet.from_cuts(
+    #     [cut for cut in cuts if cut.load_audio() is not None]
+    #     )
+    print(f"num cuts: {len(cuts)}")
+    print(f"num cuts: {len(valid_cuts)}")
+
+    exported = valid_cuts.to_shar(out_shar_dir, fields={}, num_jobs=1, shard_size=shard_size)
     print(f"...share created")
     
     for i, path in tqdm(enumerate(exported["cuts"])):
