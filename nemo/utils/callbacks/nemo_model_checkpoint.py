@@ -467,6 +467,16 @@ class NeMoModelCheckpoint(ModelCheckpoint):
                 self.deferred_ckpts_to_remove.append([])
             else:
                 storage_options = None
+            
+            # import wandb
+            # wandb.finish()  # Ensure previous logging session is closed
+            # wandb.init(reinit=True)  # Restart W&B
+            
+            # import torch
+            # import gc
+            # torch.cuda.empty_cache()
+            # gc.collect()
+            
             trainer.save_checkpoint(filepath, self.save_weights_only, storage_options=storage_options)
             if self.async_save:
                 logging.info(f'Scheduled async checkpoint save for {filepath}')

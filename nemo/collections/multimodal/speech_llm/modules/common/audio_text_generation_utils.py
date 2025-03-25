@@ -434,7 +434,7 @@ def generate(
             context_start_idx,
         ) = receive_generate_info(has_multi_audios)
     """
-
+    # import ipdb; ipdb.set_trace()
     if isinstance(inference_strategy, AudioToAudioGenerationStrategy):
         if call_responses_tensor is not None:
             generate_func = s2s_synced_generate_fc

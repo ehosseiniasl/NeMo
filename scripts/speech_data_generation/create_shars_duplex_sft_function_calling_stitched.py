@@ -40,8 +40,11 @@ def json_reader(filename):
 
 def num_function_turns(data):
     c = 0
-    for d in data:
-        if "<TOOLCALL>" in d['value'] or "<TOOL_RESPONSE>" in d['value']:
+    for i, d in enumerate(data):
+        # if "<TOOLCALL>" in d['value_normalized'] or "<TOOL_RESPONSE>" in d['value_normalized']:
+        if i % 2 == 0 and ("<TOOLCALL>" in d['value'] or "<TOOL_RESPONSE>" in d['value']):
+            c += 1
+        elif i % 2 != 0 and ("<TOOLCALL>" in d['value'] or "<TOOL_RESPONSE>" in d['value']):
             c += 1
     return c
 
@@ -162,7 +165,8 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
         cur_agent_audio = None
         for i in range(0, len(convs), 2):
 
-            if 'audio_value' not in convs[i]:
+            # if 'audio_value' not in convs[i]:
+            if '<TOOLCALL>' in convs[i]['value'] or '<TOOL_RESPONSE>' in convs[i]['value']:
                 user_function = convs[i]['value']
                 user_transcript = ""
                 user_path = "" #np.zeros((0,0))
@@ -206,7 +210,8 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
 
             
             try:
-                if 'audio_value' not in convs[i+1]:
+                # if 'audio_value' not in convs[i+1]:
+                if '<TOOLCALL>' in convs[i+1]['value'] or '<TOOL_RESPONSE>' in convs[i+1]['value']:
                     assistant_function = convs[i+1]['value']
                     assistant_transcript = ""
                     assistant_path = "" #np.zeros((0,0))
@@ -215,6 +220,7 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
                     assert 'audio_value' in convs[i+1]
                     assistant_function = ""
                     assistant_transcript = convs[i+1]['value_normalized']
+                    # assistant_transcript = convs[i+1]['value_summarized']
                     if convs[i+1]['audio_value'].startswith("/lustre/fsw"):
                         assistant_path = convs[i+1]['audio_value']
                     else:
