@@ -2382,25 +2382,26 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
                         all_channels.append(combined_channels)
                         encoded_channels.append(encoded_user)
                     
-                    # elif 'instructions' in audio_batch:
-                    #     sys_prompts = audio_batch['instructions'][i]
-                    #     sys_prompt_lens = audio_batch['instructions_len'][i]
-                    #     sys_prompts = sys_prompts[:sys_prompt_lens] # ignore pad tokens
-                    #     encoded_user = encoded[i]
-                    #     sys_prompts_extended = sys_prompts
-                    #     func_channel = torch.full(sliced_text_channel_extended.shape, text_unk_id, device=sliced_text_channel_extended.device)
+                    elif 'instructions' in audio_batch and audio_batch['instructions'] is not None: # system instruction only data
+                        speech_nosil_id = self.cfg.data.train_ds.speech_nosil_id
+                        sys_prompts = audio_batch['instructions'][i]
+                        sys_prompt_lens = audio_batch['instructions_len'][i]
+                        sys_prompts = sys_prompts[:sys_prompt_lens] # ignore pad tokens
+                        encoded_user = encoded[i]
+                        sys_prompts_extended = sys_prompts
+                        func_channel = torch.full(sliced_text_channel_extended.shape, text_unk_id, device=sliced_text_channel_extended.device)
                         
-                    #     shift_length = 0
-                    #     j = 0
+                        shift_length = 0
+                        j = 0
                         
-                    #     sliced_text_channel_extended = torch.cat([torch.full([len(call_responses_extended[j]), 1], text_unk_id, device=sliced_text_channel_extended.device), sliced_text_channel_extended], axis=0)
-                    #     func_channel = torch.cat([call_responses_extended[j].unsqueeze(1), func_channel], axis=0) # add instruction to func channel
-                    #     answer_codec_shifted = torch.cat([torch.full([len(call_responses_extended[j]), answer_codec_shifted.shape[-1]], speech_nosil_id, device=answer_codec_shifted.device), answer_codec_shifted], axis=0)
-                    #     encoded_user = torch.cat([torch.full([len(call_responses_extended[j]), encoded_user.shape[-1]], 0.0, device=encoded_user.device), encoded_user], axis=0)
+                        sliced_text_channel_extended = torch.cat([torch.full([len(sys_prompts_extended), 1], text_unk_id, device=sliced_text_channel_extended.device), sliced_text_channel_extended], axis=0)
+                        func_channel = torch.cat([sys_prompts_extended.unsqueeze(1), func_channel], axis=0) # add instruction to func channel
+                        answer_codec_shifted = torch.cat([torch.full([len(sys_prompts_extended), answer_codec_shifted.shape[-1]], speech_nosil_id, device=answer_codec_shifted.device), answer_codec_shifted], axis=0)
+                        encoded_user = torch.cat([torch.full([len(sys_prompts_extended), encoded_user.shape[-1]], 0.0, device=encoded_user.device), encoded_user], axis=0)
 
-                    #     combined_channels = torch.cat([sliced_text_channel_extended, func_channel, answer_codec_shifted], dim=-1)
-                    #     all_channels.append(combined_channels)
-                    #     encoded_channels.append(encoded_user)
+                        combined_channels = torch.cat([sliced_text_channel_extended, func_channel, answer_codec_shifted], dim=-1)
+                        all_channels.append(combined_channels)
+                        encoded_channels.append(encoded_user)
                     
                     else: # no function calling or sytem data, use dummy token in system channel
                         func_channel = torch.full(sliced_text_channel_extended.shape, text_unk_id, device=sliced_text_channel_extended.device) # dummy function channel

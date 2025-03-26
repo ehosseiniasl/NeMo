@@ -1250,7 +1250,7 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
 
         return return_batch
     
-    def __getitem__duplex_sft_(self, cuts) -> dict[str, torch.Tensor | list[str] | dict]:
+    def __getitem__duplex_system_(self, cuts) -> dict[str, torch.Tensor | list[str] | dict]:
         import re
 
         cuts = cuts.sort_by_duration()
@@ -1557,14 +1557,14 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             assert cut.supervisions[0].speaker == 'system'
             instruction_segment = cut.supervisions[0]
             
-            # if 'function' in cut.supervisions[1].custom:
-            #     user_segments = [sup for sup in cut.supervisions[1:] if sup.speaker == "User" and sup.custom['function'] == '']
-            #     agent_segments = [sup for sup in cut.supervisions[1:] if sup.speaker == "Assistant" and sup.custom['function'] == '']
-            #     function_segments = [sup for sup in cut.supervisions[1:] if sup.custom['function'] != '']
-            # else:
-            #     user_segments = [sup for sup in cut.supervisions[1:] if sup.speaker == "User"]
-            #     agent_segments = [sup for sup in cut.supervisions[1:] if sup.speaker == "Assistant"]
-            #     function_segments = []
+            if 'function' in cut.supervisions[1].custom:
+                user_segments = [sup for sup in cut.supervisions[1:] if sup.speaker == "User" and sup.custom['function'] == '']
+                agent_segments = [sup for sup in cut.supervisions[1:] if sup.speaker == "Assistant" and sup.custom['function'] == '']
+                function_segments = [sup for sup in cut.supervisions[1:] if sup.custom['function'] != '']
+            else:
+                user_segments = [sup for sup in cut.supervisions[1:] if sup.speaker == "User"]
+                agent_segments = [sup for sup in cut.supervisions[1:] if sup.speaker == "Assistant"]
+                function_segments = []
 
             # total_steps = (
             #     torch.ceil(
@@ -1874,6 +1874,8 @@ class LhotseAudioQuestionAnswerDataset(torch.utils.data.Dataset):
             return self.__getitem__duplex_overlap_(cuts)
         if getattr(cuts[0], "s2s_duplex_functioncalling", False):
             return self.__getitem__duplex_functioncalling_(cuts)
+        if getattr(cuts[0], "s2s_duplex_system", False):
+            return self.__getitem__duplex_system_(cuts)
 
         '''
         # half-duplex single turn s2s data and multi turn s2s data go here
