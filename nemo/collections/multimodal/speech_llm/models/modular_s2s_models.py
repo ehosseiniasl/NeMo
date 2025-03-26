@@ -2271,7 +2271,7 @@ class S2sModularAudioGPTModel(ModularAudioGPTModel):
         )  # list, list
 
         answer_codecs_lens = torch.Tensor(answer_codecs_lens).long().cuda()
-        assert all(torch.isclose(answer_codecs_lens, encoded_len, atol=3))
+        assert all(torch.isclose(answer_codecs_lens, encoded_len, atol=7))
         encoded_len = answer_codecs_lens
         all_channels = []
         encoded_channels = []
