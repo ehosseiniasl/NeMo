@@ -282,9 +282,9 @@ model:
           - type: lhotse_shar
             shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+respond_train
           - type: lhotse_shar
-            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+refusal
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+refusal_train
           - type: lhotse_shar
-            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+refusal
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+refusal_train
           # - type: lhotse_shar
           #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.00/even_toolcall_response/xlam-functioncalling+paralleltoolcall
           # - type: lhotse_shar
