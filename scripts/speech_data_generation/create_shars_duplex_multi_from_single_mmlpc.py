@@ -34,10 +34,6 @@ from lhotse.array import Array, TemporalArray
 from lhotse.audio import RecordingSet, save_audio
 from lhotse.cut.base import Cut
 from lhotse.features.base import Features, FeatureSet
-from lhotse.shar import SharWriter
-from lhotse.shar.writers.array import ArrayTarWriter
-from lhotse.shar.writers.audio import AudioTarWriter
-from lhotse.shar.writers.text import TextTarWriter
 from lhotse.utils import Pathlike
 from matplotlib import pyplot as plt
 from tqdm import tqdm
@@ -72,185 +68,214 @@ def create_shards(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Read manifest
-    in_manifest = list(json_reader(manifest_path))
-    print(f"Read {len(in_manifest)} entries from manifest")
+    # Create temp directory for audio files
+    temp_dir = tempfile.mkdtemp()
+    print(f"Created temporary directory: {temp_dir}")
 
-    # Check if required files exist and clean manifest
-    cleaned_manifest = []
-    for i, entry in tqdm(enumerate(in_manifest)):
-        try:
-            # Get audio paths and construct full paths
-            audio_filepath = entry["audio_filepath"]
-            question_wav = os.path.join(audio_dir, audio_filepath)
-            target_wav = os.path.join(answer_audio_dir, entry["target_wav"])
-            
-            # Check if required files exist
-            if not os.path.exists(question_wav):
-                raise FileNotFoundError(f"File not found: {question_wav}")
-            if not os.path.exists(target_wav):
-                raise FileNotFoundError(f"File not found: {target_wav}")
-                
-            cleaned_manifest.append(entry)
-            
-        except Exception as e:
-            logging.info(f'Skipping {i}th json record: {str(e)}')
-            
-    in_manifest = cleaned_manifest
-    print(f"Number of valid recordings: {len(in_manifest)}")
+    try:
+        # Read manifest
+        in_manifest = list(json_reader(manifest_path))
+        print(f"Read {len(in_manifest)} entries from manifest")
 
-    # Calculate number of cuts based on processing 4 samples at a time
-    num_cuts = len(in_manifest) // 4
-    print(f"Will create {num_cuts} cuts, processing 4 samples at a time")
-
-    # Create list to hold all cuts
-    all_cuts = []
-    
-    # Create and process all cuts
-    for j in tqdm(range(num_cuts)):
-        try:
-            # Create initial cut
-            cut = MonoCut(
-                id=f"cut_{j}",
-                start=0,
-                duration=0,  # Will be updated later
-                channel=0,
-                recording=None,  # Will be set later
-                supervisions=[]
-            )
-            
-            user_audio_list = []
-            agent_audio_list = []
-            total_dur = 0
-
-            # Take 2 from start and 2 from end
-            entries = []
-            entries.append(in_manifest[j * 2])                    # First from start
-            entries.append(in_manifest[j * 2 + 1])               # Second from start
-            entries.append(in_manifest[len(in_manifest) - j * 2 - 2])  # Second from end
-            entries.append(in_manifest[len(in_manifest) - j * 2 - 1])  # First from end
-            
-            # Process each entry individually
-            temp_files = []  # Keep track of temporary files to clean up later
-            for entry_idx, entry in enumerate(entries):
-                try:
-                    # Get audio paths and construct full paths
-                    audio_filepath = entry["audio_filepath"]
-                    question_wav = os.path.join(audio_dir, audio_filepath)
-                    target_wav = os.path.join(answer_audio_dir, entry["target_wav"])
-                    
-                    # Load and concatenate both audio files
-                    user_audio = Recording.from_file(question_wav)
-                    question_audio = Recording.from_file(question_wav)
-                    
-                    # Concatenate the recordings (user_audio first, then question_audio)
-                    user_recording = Recording.concatenate([user_audio, question_audio])
-                    agent_recording = Recording.from_file(target_wav)
-                    
-                    # Create supervision segments
-                    user_supervision = SupervisionSegment(
-                        id=os.path.basename(question_wav),
-                        recording_id=os.path.basename(question_wav),
-                        start=total_dur,
-                        duration=user_recording.duration,
-                        text=f"{entry.get('text', '')} {entry.get('question', '')}",
-                        speaker="USER",
-                        language=entry.get("source_lang", "EN"),
-                    )
-                    
-                    agent_supervision = SupervisionSegment(
-                        id=os.path.basename(target_wav),
-                        recording_id=os.path.basename(target_wav),
-                        start=total_dur + user_recording.duration + turn_silence_sec,
-                        duration=agent_recording.duration,
-                        text=entry.get("answer", ""),
-                        speaker=entry.get("answer_speaker", "AGENT"),
-                        language=entry.get("target_lang", "EN"),
-                    )
-
-                    # Add supervisions to cut
-                    cut.supervisions.append(user_supervision)
-                    cut.supervisions.append(agent_supervision)
-
-                    # Process audio
-                    sample_rate = agent_recording.sampling_rate
-                    user_duration = user_recording.duration + turn_silence_sec
-                    agent_duration = agent_recording.duration
-                    cur_user_audio = user_recording.resample(sample_rate).load_audio()
-                    cur_agent_audio = agent_recording.load_audio()
-
-                    silence_padding = np.zeros((1, int(turn_silence_sec * sample_rate)))
-                    user_audio_list.extend([cur_user_audio, silence_padding, np.zeros_like(cur_agent_audio)])
-                    agent_audio_list.extend([np.zeros_like(cur_user_audio), silence_padding, cur_agent_audio])
-
-                    total_dur += user_duration + agent_duration
-
-                except Exception as e:
-                    print(f"Error processing entry {entry_idx} in cut {j}: {str(e)}")
-                    continue
-
-            # Clean up temporary files after we're done with this cut
-            for temp_file in temp_files:
-                try:
-                    os.remove(temp_file)
-                except Exception as e:
-                    logging.info(f"Failed to remove temporary file {temp_file}: {str(e)}")
-
-            # Process final audio
-            user_audio = np.concatenate(user_audio_list, axis=1)
-            agent_audio = np.concatenate(agent_audio_list, axis=1)
-            
-            cut.duration = total_dur + turn_silence_sec
-            cut.duration_no_sil = total_dur
-            cut.start = 0.0
-
-            # Save user and agent audio to temporary files
-            user_temp_path = f"/tmp/final_user_{j}.wav"
-            agent_temp_path = f"/tmp/final_agent_{j}.wav"
-            
-            # Save the audio using soundfile
-            sf.write(user_temp_path, user_audio.T, sample_rate)
-            sf.write(agent_temp_path, agent_audio.T, sample_rate)
-            
-            # Create recordings from the temporary files
-            cut.recording = Recording.from_file(user_temp_path)
-            cut.target_audio = Recording.from_file(agent_temp_path)
-            
-            # Clean up temporary files
+        # Check if required files exist and clean manifest
+        cleaned_manifest = []
+        for i, entry in tqdm(enumerate(in_manifest)):
             try:
-                os.remove(user_temp_path)
-                os.remove(agent_temp_path)
-            except Exception as e:
-                logging.info(f"Failed to remove temporary files: {str(e)}")
+                # Get audio paths and construct full paths
+                audio_filepath = entry["audio_filepath"]
+                audio_wav = os.path.join(audio_dir, audio_filepath)
+                question_wav = entry.get("question_wav")  # Make question_wav optional
+                target_wav = os.path.join(answer_audio_dir, entry["target_wav"])
                 
-            # Add the fully processed cut to our list
-            all_cuts.append(cut)
+                # Check if required files exist
+                if not os.path.exists(audio_wav):
+                    raise FileNotFoundError(f"File not found: {audio_wav}")
+                if question_wav and not os.path.exists(question_wav):  # Only check if question_wav is provided
+                    raise FileNotFoundError(f"File not found: {question_wav}")
+                if not os.path.exists(target_wav):
+                    raise FileNotFoundError(f"File not found: {target_wav}")
+                    
+                cleaned_manifest.append(entry)
+                
+            except Exception as e:
+                logging.info(f'Skipping {i}th json record: {str(e)}')
+                
+        in_manifest = cleaned_manifest
+        print(f"Number of valid recordings: {len(in_manifest)}")
 
-        except Exception as e:
-            print(f"Error processing cut {j}: {str(e)}")
-            continue
+        # Calculate number of cuts based on processing 4 samples at a time
+        num_cuts = len(in_manifest) // 4
+        print(f"Will create {num_cuts} cuts, processing 4 samples at a time")
 
-    # Create CutSet once after all cuts are fully processed
-    print("Creating final CutSet...")
-    cuts = CutSet.from_cuts(all_cuts)
-    print(f"Created {len(cuts)} cuts")
+        # Create list to hold all cuts
+        all_cuts = []
+        
+        # Create and process all cuts
+        for j in tqdm(range(num_cuts)):
+            try:
+                # Create initial cut
+                cut = MonoCut(
+                    id=f"cut_{j}",
+                    start=0,
+                    duration=0,  # Will be updated later
+                    channel=0,
+                    recording=None,  # Will be set later
+                    supervisions=[]
+                )
+                
+                user_audio_list = []
+                agent_audio_list = []
+                total_dur = 0
 
-    # Create shards
-    with SharWriter(
-        output_dir,
-        shard_size=shard_size,
-        shard_prefix=shard_prefix,
-        fields={
-            "recording": AudioTarWriter,
-            "target_audio": AudioTarWriter,
-            "features": ArrayTarWriter,
-            "custom_fields": TextTarWriter,
-        },
-    ) as writer:
-        for cut in cuts:
-            writer.write(cut)
+                # Take 2 from start and 2 from end
+                entries = []
+                entries.append(in_manifest[j * 2])                    # First from start
+                entries.append(in_manifest[j * 2 + 1])               # Second from start
+                entries.append(in_manifest[len(in_manifest) - j * 2 - 2])  # Second from end
+                entries.append(in_manifest[len(in_manifest) - j * 2 - 1])  # First from end
+                
+                # Process each entry individually
+                for entry_idx, entry in enumerate(entries):
+                    try:
+                        # Get audio paths and construct full paths
+                        audio_filepath = entry["audio_filepath"]
+                        audio_wav = os.path.join(audio_dir, audio_filepath)
+                        question_wav = entry.get("question_wav")
+                        target_wav = os.path.join(answer_audio_dir, entry["target_wav"])
+                        
+                        # Load and concatenate both audio files
+                        user_audio_data, user_sr = sf.read(audio_wav)
+                        if question_wav:
+                            question_audio_data, question_sr = sf.read(question_wav)
+                            # Ensure same sample rate
+                            if question_sr != user_sr:
+                                # Resample question audio to match user audio
+                                question_audio = Recording.from_file(question_wav)
+                                question_audio = question_audio.resample(user_sr)
+                                question_audio_data = question_audio.load_audio()
+                            # Convert to mono if stereo
+                            if len(user_audio_data.shape) > 1:
+                                user_audio_data = user_audio_data[:, 0]
+                            if len(question_audio_data.shape) > 1:
+                                question_audio_data = question_audio_data[:, 0]
+                            # Reshape for concatenation
+                            user_audio_data = user_audio_data.reshape(1, -1)
+                            question_audio_data = question_audio_data.reshape(1, -1)
+                            # Concatenate the audio data
+                            user_recording_data = np.concatenate([user_audio_data, question_audio_data], axis=1)
+                        else:
+                            # Convert to mono if stereo
+                            if len(user_audio_data.shape) > 1:
+                                user_audio_data = user_audio_data[:, 0]
+                            # Reshape for concatenation
+                            user_recording_data = user_audio_data.reshape(1, -1)
 
-    print(f"Created shards in {output_dir}")
+                        # Save concatenated user audio
+                        user_temp_path = os.path.join(temp_dir, f'final_user_{j}.wav')
+                        sf.write(user_temp_path, user_recording_data.T, user_sr)
+                        user_recording = Recording.from_file(user_temp_path)
+
+                        # Load and process agent audio
+                        agent_audio_data, agent_sr = sf.read(target_wav)
+                        if len(agent_audio_data.shape) > 1:
+                            agent_audio_data = agent_audio_data[:, 0]
+                        agent_audio_data = agent_audio_data.reshape(1, -1)
+                        
+                        # Save agent audio
+                        agent_temp_path = os.path.join(temp_dir, f'final_agent_{j}.wav')
+                        sf.write(agent_temp_path, agent_audio_data.T, agent_sr)
+                        agent_recording = Recording.from_file(agent_temp_path)
+                        
+                        # Create supervision segments
+                        user_supervision = SupervisionSegment(
+                            id=os.path.basename(audio_wav),
+                            recording_id=os.path.basename(audio_wav),
+                            start=total_dur,
+                            duration=user_recording.duration,
+                            text=f"{entry.get('text', '')} {entry.get('question', '')}",
+                            speaker="user",
+                            language=entry.get("source_lang", "EN"),
+                        )
+                        
+                        agent_supervision = SupervisionSegment(
+                            id=os.path.basename(target_wav),
+                            recording_id=os.path.basename(target_wav),
+                            start=total_dur + user_recording.duration + turn_silence_sec,
+                            duration=agent_recording.duration,
+                            text=entry.get("answer", ""),
+                            speaker=entry.get("answer_speaker", "assistant"),
+                            language=entry.get("target_lang", "EN"),
+                        )
+
+                        # Add supervisions to cut
+                        cut.supervisions.append(user_supervision)
+                        cut.supervisions.append(agent_supervision)
+
+                        # Process audio
+                        sample_rate = agent_recording.sampling_rate
+                        user_duration = user_recording.duration + turn_silence_sec
+                        agent_duration = agent_recording.duration
+                        cur_user_audio = user_recording.load_audio()
+                        cur_agent_audio = agent_recording.load_audio()
+
+                        silence_padding = np.zeros((1, int(turn_silence_sec * sample_rate)))
+                        user_audio_list.extend([cur_user_audio, silence_padding, np.zeros_like(cur_agent_audio)])
+                        agent_audio_list.extend([np.zeros_like(cur_user_audio), silence_padding, cur_agent_audio])
+
+                        total_dur += user_duration + agent_duration
+
+                    except Exception as e:
+                        print(f"Error processing entry {entry_idx} in cut {j}: {str(e)}")
+                        continue
+
+                # Process final audio
+                user_audio = np.concatenate(user_audio_list, axis=1)
+                agent_audio = np.concatenate(agent_audio_list, axis=1)
+
+                # Save final audio files
+                final_user_path = os.path.join(temp_dir, f'final_user_{j}.wav')
+                final_agent_path = os.path.join(temp_dir, f'final_agent_{j}.wav')
+                
+                sf.write(final_user_path, user_audio.T, sample_rate)
+                sf.write(final_agent_path, agent_audio.T, sample_rate)
+                
+                # Create recordings and get actual durations
+                user_recording = Recording.from_file(final_user_path)
+                agent_recording = Recording.from_file(final_agent_path)
+                
+                # Update cut with actual durations
+                cut.recording = user_recording
+                cut.target_audio = agent_recording
+                cut.duration = user_recording.duration
+                cut.duration_no_sil = user_recording.duration - turn_silence_sec
+                cut.start = 0.0
+                
+                # Add the fully processed cut to our list
+                all_cuts.append(cut)
+
+            except Exception as e:
+                print(f"Error processing cut {j}: {str(e)}")
+                continue
+
+        # Create CutSet once after all cuts are fully processed
+        print("Creating final CutSet...")
+        cuts = CutSet.from_cuts(all_cuts)
+        print(f"Created {len(cuts)} cuts")
+
+        # Create shards using to_shar method
+        print("Creating shards...")
+        cuts.to_shar(
+            output_dir,
+            fields={"recording": "flac", "target_audio": "flac"},
+            num_jobs=num_jobs,
+            shard_size=shard_size
+        )
+        print(f"Created shards in {output_dir}")
+
+    finally:
+        # Clean up temporary directory after shards are created
+        print(f"Cleaning up temporary directory: {temp_dir}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 def main():
     parser = argparse.ArgumentParser()
