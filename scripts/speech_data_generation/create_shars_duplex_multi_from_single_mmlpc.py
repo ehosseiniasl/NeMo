@@ -59,6 +59,7 @@ def create_shards(
     num_jobs: int = 1,
     random_seed: int = 42,
     turn_silence_sec: float = 0.32,
+    speaker_after_user: str = "assistant",
 ) -> None:
     """Create shards from a manifest with multiple speakers."""
     random.seed(random_seed)
@@ -79,8 +80,17 @@ def create_shards(
 
         # Check if required files exist and clean manifest
         cleaned_manifest = []
+        excluded_german = 0
+        excluded_missing_files = 0
+        
         for i, entry in tqdm(enumerate(in_manifest)):
             try:
+                # Skip entries with unwanted question text
+                if "Transcribe the spoken content to written German text" in entry.get("question", ""):
+                    logging.info(f'Skipping {i}th json record: contains German transcription request')
+                    excluded_german += 1
+                    continue
+
                 # Get audio paths and construct full paths
                 audio_filepath = entry["audio_filepath"]
                 audio_wav = os.path.join(audio_dir, audio_filepath)
@@ -99,9 +109,13 @@ def create_shards(
                 
             except Exception as e:
                 logging.info(f'Skipping {i}th json record: {str(e)}')
+                excluded_missing_files += 1
                 
         in_manifest = cleaned_manifest
         print(f"Number of valid recordings: {len(in_manifest)}")
+        print(f"Number of excluded German transcription examples: {excluded_german}")
+        print(f"Number of excluded examples due to missing files: {excluded_missing_files}")
+        print(f"Total excluded examples: {excluded_german + excluded_missing_files}")
 
         # Calculate number of cuts based on processing 4 samples at a time
         num_cuts = len(in_manifest) // 4
@@ -203,7 +217,7 @@ def create_shards(
                             start=total_dur + user_recording.duration + turn_silence_sec,
                             duration=agent_recording.duration,
                             text=entry.get("answer", ""),
-                            speaker=entry.get("answer_speaker", "assistant"),
+                            speaker=speaker_after_user,
                             language=entry.get("target_lang", "EN"),
                         )
 
@@ -279,73 +293,47 @@ def create_shards(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--manifest',
-        type=str,
-        required=True,
-        help="Path to the input manifest.",
-    )
-    parser.add_argument(
-        '--output_dir',
-        type=str,
-        required=True,
-        help="Path to the output directory.",
-    )
-    parser.add_argument(
-        '--audio_dir',
-        type=str,
-        required=True,
-        help="Directory containing the question audio files.",
-    )
-    parser.add_argument(
-        '--answer_audio_dir',
-        type=str,
-        required=True,
-        help="Directory containing the answer audio files.",
-    )
-    parser.add_argument(
-        '--shard_size',
-        type=int,
-        default=1000,
-        help="Number of cuts per shard.",
-    )
-    parser.add_argument(
-        '--shard_prefix',
-        type=str,
-        default="cuts",
-        help="Prefix for the shard files.",
-    )
-    parser.add_argument(
-        '--num_jobs',
-        type=int,
-        default=1,
-        help="Number of jobs for parallel processing.",
-    )
-    parser.add_argument(
-        '--random_seed',
-        type=int,
-        default=42,
-        help="Random seed for reproducibility.",
-    )
-    parser.add_argument(
-        '--turn_silence_sec',
-        type=float,
-        default=0.32,
-        help="Silence duration between turns in seconds.",
-    )
-
+    parser.add_argument("--manifest", type=str, required=True, help="Path to manifest file")
+    parser.add_argument("--output_dir", type=str, required=True, help="Path to output directory")
+    parser.add_argument("--audio_dir", type=str, required=True, help="Path to audio directory")
+    parser.add_argument("--answer_audio_dir", type=str, required=True, help="Path to answer audio directory")
+    parser.add_argument("--shard_size", type=int, default=100, help="Number of entries per shard")
+    parser.add_argument("--shard_prefix", type=str, default="cuts", help="Prefix for shard files")
+    parser.add_argument("--num_jobs", type=int, default=1, help="Number of jobs to run in parallel")
+    parser.add_argument("--random_seed", type=int, default=42, help="Random seed for shuffling")
+    parser.add_argument("--turn_silence_sec", type=float, default=0.32, help="Silence duration between turns")
+    parser.add_argument("--speaker_after_user", type=str, default="assistant", help="Speaker name after user turn")
     args = parser.parse_args()
-    create_shards(
-        args.manifest,
-        args.output_dir,
-        args.audio_dir,
-        args.answer_audio_dir,
-        args.shard_size,
-        args.shard_prefix,
-        args.num_jobs,
-        args.random_seed,
-        args.turn_silence_sec,
-    )
+
+    # Set random seed
+    random.seed(args.random_seed)
+
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Load manifest
+    with open(args.manifest, 'r') as f:
+        manifest = [json.loads(line) for line in f]
+
+    # Shuffle manifest
+    random.shuffle(manifest)
+
+    # Create shards
+    num_shards = (len(manifest) + args.shard_size - 1) // args.shard_size
+    for i in range(num_shards):
+        start_idx = i * args.shard_size
+        end_idx = min((i + 1) * args.shard_size, len(manifest))
+        shard = manifest[start_idx:end_idx]
+
+        # Create output file
+        output_file = os.path.join(args.output_dir, f"{args.shard_prefix}_{i:03d}.json")
+        with open(output_file, 'w') as f:
+            for entry in shard:
+                # Add speaker information
+                entry['speaker'] = args.speaker_after_user
+                f.write(json.dumps(entry) + '\n')
+
+        print(f"Created shard {i+1}/{num_shards}: {output_file}")
 
 if __name__ == "__main__":
     main() 
