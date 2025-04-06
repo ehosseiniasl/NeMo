@@ -305,35 +305,19 @@ def main():
     parser.add_argument("--speaker_after_user", type=str, default="assistant", help="Speaker name after user turn")
     args = parser.parse_args()
 
-    # Set random seed
-    random.seed(args.random_seed)
-
-    # Create output directory if it doesn't exist
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    # Load manifest
-    with open(args.manifest, 'r') as f:
-        manifest = [json.loads(line) for line in f]
-
-    # Shuffle manifest
-    random.shuffle(manifest)
-
-    # Create shards
-    num_shards = (len(manifest) + args.shard_size - 1) // args.shard_size
-    for i in range(num_shards):
-        start_idx = i * args.shard_size
-        end_idx = min((i + 1) * args.shard_size, len(manifest))
-        shard = manifest[start_idx:end_idx]
-
-        # Create output file
-        output_file = os.path.join(args.output_dir, f"{args.shard_prefix}_{i:03d}.json")
-        with open(output_file, 'w') as f:
-            for entry in shard:
-                # Add speaker information
-                entry['speaker'] = args.speaker_after_user
-                f.write(json.dumps(entry) + '\n')
-
-        print(f"Created shard {i+1}/{num_shards}: {output_file}")
+    # Create shards using the create_shards function
+    create_shards(
+        manifest_path=args.manifest,
+        output_dir=args.output_dir,
+        audio_dir=args.audio_dir,
+        answer_audio_dir=args.answer_audio_dir,
+        shard_size=args.shard_size,
+        shard_prefix=args.shard_prefix,
+        num_jobs=args.num_jobs,
+        random_seed=args.random_seed,
+        turn_silence_sec=args.turn_silence_sec,
+        speaker_after_user=args.speaker_after_user
+    )
 
 if __name__ == "__main__":
     main() 
