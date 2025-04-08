@@ -74,7 +74,7 @@ def create_shards(
     print(f"Created temporary directory: {temp_dir}")
 
     try:
-        # Read manifest
+        # Read manifest and process entries
         in_manifest = list(json_reader(manifest_path))
         print(f"Read {len(in_manifest)} entries from manifest")
 
@@ -110,6 +110,7 @@ def create_shards(
             except Exception as e:
                 logging.info(f'Skipping {i}th json record: {str(e)}')
                 excluded_missing_files += 1
+                continue
                 
         in_manifest = cleaned_manifest
         print(f"Number of valid recordings: {len(in_manifest)}")
@@ -263,7 +264,7 @@ def create_shards(
                 cut.duration = user_recording.duration
                 cut.duration_no_sil = user_recording.duration - turn_silence_sec
                 cut.start = 0.0
-                
+
                 # Add the fully processed cut to our list
                 all_cuts.append(cut)
 
@@ -320,4 +321,4 @@ def main():
     )
 
 if __name__ == "__main__":
-    main() 
+    main()
