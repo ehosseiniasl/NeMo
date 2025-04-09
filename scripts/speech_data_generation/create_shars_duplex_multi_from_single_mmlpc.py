@@ -155,12 +155,14 @@ def create_shards(
                         # Get audio paths and construct full paths
                         audio_filepath = entry["audio_filepath"]
                         audio_wav = os.path.join(audio_dir, audio_filepath)
-                        question_wav = entry.get("question_wav")
+                        question_wav = entry.get("question_wav")  # This is optional
                         target_wav = os.path.join(answer_audio_dir, entry["target_wav"])
                         
                         # Load and concatenate both audio files
                         user_audio_data, user_sr = sf.read(audio_wav)
-                        if question_wav:
+                        
+                        # Handle question audio if available
+                        if question_wav and os.path.exists(question_wav):
                             question_audio_data, question_sr = sf.read(question_wav)
                             # Ensure same sample rate
                             if question_sr != user_sr:
@@ -247,6 +249,25 @@ def create_shards(
                 user_audio = np.concatenate(user_audio_list, axis=1)
                 agent_audio = np.concatenate(agent_audio_list, axis=1)
 
+                # Calculate the last assistant's end time
+                last_assistant_end = 0.0
+                for supervision in cut.supervisions:
+                    if supervision.speaker == speaker_after_user:  # This is an assistant turn
+                        end_time = supervision.start + supervision.duration
+                        if end_time > last_assistant_end:
+                            last_assistant_end = end_time
+
+                # Calculate required duration in samples
+                required_duration_samples = int(last_assistant_end * sample_rate)
+                
+                # Pad both audio files to match the required duration
+                if user_audio.shape[1] < required_duration_samples:
+                    padding = np.zeros((1, required_duration_samples - user_audio.shape[1]))
+                    user_audio = np.concatenate([user_audio, padding], axis=1)
+                if agent_audio.shape[1] < required_duration_samples:
+                    padding = np.zeros((1, required_duration_samples - agent_audio.shape[1]))
+                    agent_audio = np.concatenate([agent_audio, padding], axis=1)
+
                 # Save final audio files
                 final_user_path = os.path.join(temp_dir, f'final_user_{j}.wav')
                 final_agent_path = os.path.join(temp_dir, f'final_agent_{j}.wav')
@@ -258,11 +279,22 @@ def create_shards(
                 user_recording = Recording.from_file(final_user_path)
                 agent_recording = Recording.from_file(final_agent_path)
                 
+                # Verify all durations match
+                if not (abs(user_recording.duration - last_assistant_end) < 0.01 and 
+                        abs(agent_recording.duration - last_assistant_end) < 0.01):
+                    print(f"Warning: Duration mismatch for cut {j}")
+                    print(f"Last assistant end: {last_assistant_end:.2f}s")
+                    print(f"User recording: {user_recording.duration:.2f}s")
+                    print(f"Agent recording: {agent_recording.duration:.2f}s")
+                
+                # Calculate number of silence periods (one between each user-assistant pair)
+                num_silence_periods = (len(cut.supervisions) - 1) // 2
+                
                 # Update cut with actual durations
                 cut.recording = user_recording
                 cut.target_audio = agent_recording
-                cut.duration = user_recording.duration
-                cut.duration_no_sil = user_recording.duration - turn_silence_sec
+                cut.duration = last_assistant_end  # Use the last assistant's end time
+                cut.duration_no_sil = last_assistant_end - (turn_silence_sec * num_silence_periods)  # Subtract only the actual silence periods
                 cut.start = 0.0
 
                 # Add the fully processed cut to our list
