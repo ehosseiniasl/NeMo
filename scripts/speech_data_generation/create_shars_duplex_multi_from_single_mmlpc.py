@@ -164,12 +164,12 @@ def create_shards(
                         # Handle question audio if available
                         if question_wav and os.path.exists(question_wav):
                             question_audio_data, question_sr = sf.read(question_wav)
-                            # Ensure same sample rate
-                            if question_sr != user_sr:
-                                # Resample question audio to match user audio
-                                question_audio = Recording.from_file(question_wav)
-                                question_audio = question_audio.resample(user_sr)
-                                question_audio_data = question_audio.load_audio()
+                            # # Ensure same sample rate
+                            # if question_sr != user_sr:
+                            #     # Resample question audio to match user audio
+                            #     question_audio = Recording.from_file(question_wav)
+                            #     question_audio = question_audio.resample(user_sr)
+                            #     question_audio_data = question_audio.load_audio()
                             # Convert to mono if stereo
                             if len(user_audio_data.shape) > 1:
                                 user_audio_data = user_audio_data[:, 0]
@@ -189,7 +189,7 @@ def create_shards(
 
                         # Save concatenated user audio
                         user_temp_path = os.path.join(temp_dir, f'final_user_{j}.wav')
-                        sf.write(user_temp_path, user_recording_data.T, user_sr)
+                        sf.write(user_temp_path, user_recording_data.T, user_sr)  # Use original sample rate
                         user_recording = Recording.from_file(user_temp_path)
 
                         # Load and process agent audio
@@ -200,7 +200,7 @@ def create_shards(
                         
                         # Save agent audio
                         agent_temp_path = os.path.join(temp_dir, f'final_agent_{j}.wav')
-                        sf.write(agent_temp_path, agent_audio_data.T, agent_sr)
+                        sf.write(agent_temp_path, agent_audio_data.T, agent_sr)  # Use original sample rate
                         agent_recording = Recording.from_file(agent_temp_path)
                         
                         # Create supervision segments
