@@ -161,39 +161,46 @@ def create_shards(
                         # Load and concatenate both audio files
                         user_audio_data, user_sr = sf.read(audio_wav)
                         
+                        # Get question sample rate first
+                        question_sr = None
+                        if question_wav and os.path.exists(question_wav):
+                            _, question_sr = sf.read(question_wav)
+                            # Resample user audio to match question sample rate
+                            user_audio = Recording.from_file(audio_wav)
+                            user_audio = user_audio.resample(question_sr)
+                            user_audio_data = user_audio.load_audio()
+                            user_sr = question_sr  # Update user sample rate
+                        
+                        # Convert user audio to mono and reshape
+                        if len(user_audio_data.shape) > 1:
+                            user_audio_data = user_audio_data[:, 0]
+                        user_audio_data = user_audio_data.reshape(1, -1)
+                        
                         # Handle question audio if available
                         if question_wav and os.path.exists(question_wav):
-                            question_audio_data, question_sr = sf.read(question_wav)
-                            # # Ensure same sample rate
-                            # if question_sr != user_sr:
-                            #     # Resample question audio to match user audio
-                            #     question_audio = Recording.from_file(question_wav)
-                            #     question_audio = question_audio.resample(user_sr)
-                            #     question_audio_data = question_audio.load_audio()
+                            question_audio_data, _ = sf.read(question_wav)  # We already have the sample rate
                             # Convert to mono if stereo
-                            if len(user_audio_data.shape) > 1:
-                                user_audio_data = user_audio_data[:, 0]
                             if len(question_audio_data.shape) > 1:
                                 question_audio_data = question_audio_data[:, 0]
                             # Reshape for concatenation
-                            user_audio_data = user_audio_data.reshape(1, -1)
                             question_audio_data = question_audio_data.reshape(1, -1)
                             # Concatenate the audio data
                             user_recording_data = np.concatenate([user_audio_data, question_audio_data], axis=1)
                         else:
-                            # Convert to mono if stereo
-                            if len(user_audio_data.shape) > 1:
-                                user_audio_data = user_audio_data[:, 0]
-                            # Reshape for concatenation
-                            user_recording_data = user_audio_data.reshape(1, -1)
+                            user_recording_data = user_audio_data
 
                         # Save concatenated user audio
-                        user_temp_path = os.path.join(temp_dir, f'final_user_{j}.wav')
-                        sf.write(user_temp_path, user_recording_data.T, user_sr)  # Use original sample rate
+                        user_temp_path = os.path.join(temp_dir, f'user_question_{j}_{entry_idx}.wav')
+                        sf.write(user_temp_path, user_recording_data.T, user_sr)  # Use question's sample rate
                         user_recording = Recording.from_file(user_temp_path)
 
                         # Load and process agent audio
                         agent_audio_data, agent_sr = sf.read(target_wav)
+                        
+                        # Verify that question and agent sample rates match
+                        if question_wav and os.path.exists(question_wav):
+                            assert question_sr == agent_sr, f"Question sample rate ({question_sr}) does not match agent sample rate ({agent_sr})"
+                        
                         if len(agent_audio_data.shape) > 1:
                             agent_audio_data = agent_audio_data[:, 0]
                         agent_audio_data = agent_audio_data.reshape(1, -1)
@@ -267,6 +274,9 @@ def create_shards(
                 if agent_audio.shape[1] < required_duration_samples:
                     padding = np.zeros((1, required_duration_samples - agent_audio.shape[1]))
                     agent_audio = np.concatenate([agent_audio, padding], axis=1)
+
+                # Verify that user and agent audio durations match after padding
+                assert user_audio.shape[1] == agent_audio.shape[1], f"User audio length ({user_audio.shape[1]}) does not match agent audio length ({agent_audio.shape[1]}) for cut {j}"
 
                 # Save final audio files
                 final_user_path = os.path.join(temp_dir, f'final_user_{j}.wav')
