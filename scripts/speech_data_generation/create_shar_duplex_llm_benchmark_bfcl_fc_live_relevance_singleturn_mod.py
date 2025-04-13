@@ -163,9 +163,9 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
             ),
         )
 
-        # cur_agent_audio = np.zeros_like(cur_user_audio) # assistant is empty, use user duration. 
-        # assistant_duration = user_duration
-        cur_agent_audio = np.zeros((1, int(assistant_duration * sample_rate)))
+        cur_agent_audio = np.zeros_like(cur_user_audio) # assistant is empty, use user duration. 
+        assistant_duration = user_duration
+        # cur_agent_audio = np.zeros((1, int(assistant_duration * sample_rate)))
 
         total_duration += assistant_duration        
 

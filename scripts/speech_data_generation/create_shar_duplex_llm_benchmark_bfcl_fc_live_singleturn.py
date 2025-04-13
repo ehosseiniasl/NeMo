@@ -222,7 +222,7 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
             cur_user_audio = Recording.from_file(user_path).resample(sample_rate).load_audio() # ignore metadata in audio
         except:
             ipdb.set_trace()
-        # cur_user_agent_added = False
+        cur_user_agent_added = False
         # elif cur_user_agent_added:
         #     cur_user_audio = None
         
