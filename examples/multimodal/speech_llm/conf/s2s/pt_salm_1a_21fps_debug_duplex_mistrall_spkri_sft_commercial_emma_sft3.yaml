@@ -247,9 +247,10 @@ model:
       shard_seed: "trng"
       sampler_fusion: randomized_round_robin
       sampler_weights:
-        duplex: 1.0
         blackwell: 0.005
         sft: 1.0 # 0.02
+        functioncall: 1.0
+        duplex: 1.0
 
       blackwell:
         input_cfg:
@@ -260,6 +261,7 @@ model:
             tags:
               s2s_duplex_overlap: True
               speaker_id: 1
+        shuffle: True
 
       # sys_prompt:
       #   input_cfg:
@@ -272,92 +274,103 @@ model:
       #         include_sys: True
       #         speaker_id: 1
       
-      sft: 
+      functioncall: 
         input_cfg:
         - type: group
           tags:
             s2s_duplex_functioncalling: True
-            # s2s_duplex: True
           input_cfg:
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+respond_train
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+refusal
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+refusal
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+respond_train
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+refusal_train
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+refusal_train
           # - type: lhotse_shar
           #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.00/even_toolcall_response/xlam-functioncalling+paralleltoolcall
           # - type: lhotse_shar
           #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.00/even_toolcall_response/xlam-functioncalling+toolcall
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_8.54_lmsys_noredact_nowordcnt_iter0_3p_iter1_6p_repeat10.reward6p1_part_00
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_8.54_lmsys_noredact_nowordcnt_iter0_3p_iter1_6p_repeat10.reward6p1_part_01
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_8.54_synth_v2_sft_repeat10.reward6p1
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_and_qwen_7b_math_and_gsm8k.sft.all.fewshot3
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/complex_instruction_v2_t3
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/finqa
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/lm_identity
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/lmsys_instruction_following_340b_854
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/lmsys_instruction_following_340b_instruct
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/mmlu_training_set
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/moa_lmsys_noredact_sft_90k_reward5.5p
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/open_platypus_commercial
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/openmath2_qwen2.5_7b_MATH_5m
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_multi_turn
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_second_turn
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_single_turn
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_single_turn_v2
+        shuffle: True
+
+      sft: 
+        input_cfg:
+        - type: group
+          tags:
+            s2s_duplex_system: True
+          input_cfg:
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_8.54_lmsys_noredact_nowordcnt_iter0_3p_iter1_6p_repeat10.reward6p1_part_00
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_8.54_lmsys_noredact_nowordcnt_iter0_3p_iter1_6p_repeat10.reward6p1_part_01
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_8.54_synth_v2_sft_repeat10.reward6p1
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_and_qwen_7b_math_and_gsm8k.sft.all.fewshot3
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/complex_instruction_v2_t3
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/finqa
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/lm_identity
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/lmsys_instruction_following_340b_854
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/lmsys_instruction_following_340b_instruct
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/mmlu_training_set
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/moa_lmsys_noredact_sft_90k_reward5.5p
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/open_platypus_commercial
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/openmath2_qwen2.5_7b_MATH_5m
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_multi_turn
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_second_turn
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_single_turn
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_single_turn_v2
           - type: lhotse_shar
             shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_system_multi_turn
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/rej_sampling_genetic_8x22_prompts
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/safety
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/stay_on_topic
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_incapable_questions
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_json_format_following
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_riddle
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_roleplay_v2
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/vendor_sft_1.3_all_till_20241120
           # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/rej_sampling_genetic_8x22_prompts
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/safety
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/stay_on_topic
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_incapable_questions
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_json_format_following
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_riddle
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_roleplay_v2
-          # - type: lhotse_shar
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/vendor_sft_1.3_all_till_20241120
+          #     shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn
+        shuffle: True
 
       duplex:
         input_cfg:
         - type: group
           weight: 1.0
           tags:
-            s2s_duplex: True
+            s2s_duplex_system: True
             speaker_id: 1
           input_cfg:
             - type: lhotse_shar
-              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn/
-
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn
         shuffle: True
+        
       load_answer_audio: ${model.extract_codec_on_the_fly}
       codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
       global_batch_size: ${model.global_batch_size}
       micro_batch_size: ${model.micro_batch_size}
+      shuffle: True
       num_workers: 0
       pin_memory: True
       max_seq_length: 512
@@ -399,6 +412,7 @@ model:
       # bucketing params
       bucketing_strategy: "fully_randomized"
       bucketing_batch_size: null
+      use_lhotse: True
       text_field : "text"
       batch_duration : 80  # 0
       quadratic_duration : 30
@@ -467,7 +481,8 @@ model:
             - type: lhotse_shar # this
               shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn_test/
               tags:
-                s2s_duplex_functioncalling: True 
+                # s2s_duplex_functioncalling: True 
+                s2s_duplex_system: True 
             - type: lhotse_shar # this
               shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+respond_test
               tags:
