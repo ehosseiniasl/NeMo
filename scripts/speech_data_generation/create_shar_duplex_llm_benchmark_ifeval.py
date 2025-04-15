@@ -157,7 +157,7 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
             agent_duration = 0
             cur_user_audio = Recording.from_file(os.path.join(audio_dir, convs[i]['audio_value'])).resample(sample_rate).load_audio()
             # cur_agent_audio = Recording.from_file(os.path.join(audio_dir, convs[i + 1]['audio_value'])).load_audio()
-            cur_agent_audio = np.zeros([1,1])
+            cur_agent_audio = np.zeros_like(cur_user_audio)
             # ipdb.set_trace()
             user_audio = np.concatenate([user_audio, cur_user_audio, 0 * cur_agent_audio], axis=1)
             agent_audio = np.concatenate([agent_audio, 0 * cur_user_audio, cur_agent_audio], axis=1)
@@ -166,8 +166,8 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
                 user_audio = user_audio[:, :-overlap_samples]
                 total_dur -= overlap_sec
             
-            user_audio = np.concatenate([user_audio, cur_user_audio, silence_padding, 0 * cur_agent_audio], axis=1)
-            user_duration += turn_silence_sec
+            # user_audio = np.concatenate([user_audio, cur_user_audio, silence_padding, 0 * cur_agent_audio], axis=1)
+            # user_duration += turn_silence_sec
 
             cut.supervisions.append(
                 SupervisionSegment(
