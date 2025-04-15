@@ -426,7 +426,9 @@ model:
       # names: ['bfcl_live_relevance_duplex']
       # names: ['bfcl_live_relevance']
       # names: ['bfcl_live_simple_possible_answers_dummy_response', 'bfcl_live_parallel_possible_answers_dummy_response', 'bfcl_live_multiple_possible_answers_dummy_response', 'bfcl_live_parallel_multiple_possible_answers_dummy_response']
-      names: ['bfcl_live_multiple_possible_answers_dummy_response']
+      names: ['bfcl_live_simple_possible_answers_dummy_response']
+      # names: ['bfcl_live_multiple_possible_answers_dummy_response']
+      # names: ['bfcl_live_parallel_multiple_possible_answers_dummy_response']
       # names: ['bfcl_live_simple']
       # names: ['glaive_fc_10']
       # names: ['llamaqa']
@@ -436,24 +438,24 @@ model:
           tags:
             lang: en
           input_cfg:
-          # - type: lhotse_shar
-          #   # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_relevance
-          #   # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_simple_possible_answers
-          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_simple_possible_answers_dummy_response
-          #   # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_relevance_extended
-          #   # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_simple_extended
-          #   # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+respond_test
-          #   # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+respond_test_10
-          #   tags:
-          #     s2s_duplex_functioncalling: True 
+          - type: lhotse_shar
+            # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_relevance
+            # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_simple_possible_answers
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_simple_possible_answers_dummy_response
+            # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_relevance_extended
+            # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_simple_extended
+            # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+respond_test
+            # shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+respond_test_10
+            tags:
+              s2s_duplex_functioncalling: True 
           # - type: lhotse_shar
           #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_parallel_possible_answers_dummy_response
           #   tags:
           #     s2s_duplex_functioncalling: True 
-          - type: lhotse_shar
-            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_multiple_possible_answers_dummy_response
-            tags:
-              s2s_duplex_functioncalling: True 
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_multiple_possible_answers_dummy_response
+          #   tags:
+          #     s2s_duplex_functioncalling: True 
           # - type: lhotse_shar
           #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/s2s_shars/llm_benchmarks/bfcl/BFCL_v3_live_parallel_multiple_possible_answers_dummy_response
           #   tags:
