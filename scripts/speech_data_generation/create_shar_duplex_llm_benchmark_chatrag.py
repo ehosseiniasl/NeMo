@@ -21,7 +21,10 @@ from tqdm import tqdm
 import ipdb
 from io import BytesIO
 import torchaudio
+from pprint import pprint
 
+# import lhotse
+# lhotse.audio.set_audio_backend("torchaudio")
 
 torchaudio.set_audio_backend("sox_io")
 import lhotse.audio
@@ -56,22 +59,37 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
     valid_manifest = []
     for i, line in tqdm(enumerate(in_manifest)):
         is_valid = True
-        # if len(line["conversations"]) % 2 == 0 and line['conversations'][0]['from'] == 'User':
+        # ipdb.set_trace()
+        # if len(line["conversations"]) % 2 == 0 and line['conversations'][0]['from'] == 'user':
         #     num_user = 0
         #     num_assistant = 0
         #     for idx, l in enumerate(line['conversations']):
-        #         if l['from'] == 'User':
+        #         if l['from'] == 'user':
         #             num_user += 1
         #         else:
         #             num_assistant += 1
-        #         if idx % 2 == 0 and l['from'] != 'User':
+        #         # ipdb.set_trace()
+        #         if idx % 2 == 0 and l['from'] != 'user':
+        #             print(f"invalid user {line['id']}")
+        #             ipdb.set_trace()
         #             is_valid = False
-        #         elif idx % 2 != 0 and l['from'] != 'Assistant':
+        #         elif idx % 2 != 0 and l['from'] != 'assistant':
+        #             print(f"invalid assistant {line['id']}")
         #             is_valid = False
+                
+        #         # if audio_dir not in l['audio_value']:
+        #         if not l['audio_value'].startswith(audio_dir):
+        #             if not os.path.isfile(os.path.join(audio_dir, l['audio_value'].split("/")[-1])):
+        #                 is_valid = False
+        #                 print(f"false {os.path.join(audio_dir, l['audio_value'].split('/')[-1])}")
+        #         else:
+        #             if not os.path.isfile(l['audio_value']):
+        #                 is_valid = False
+        #                 print(f"false {l['audio_value']}")
 
-            # # print(num_user, num_assistant)
-            # if num_user == num_assistant and is_valid:
-            #     valid_manifest.append(line)
+        #     # print(num_user, num_assistant)
+        #     if num_user == num_assistant and is_valid:
+        #         valid_manifest.append(line)
         valid_manifest.append(line)
 
     print(f"total conversations: {len(in_manifest)}")
@@ -81,8 +99,8 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
         # For single turn convs is a list of 2 elements
         # First element is user speech and second is agent speech
         convs = line["conversations"]
-        for conv in convs:
-            conv["audio_value"] = conv["audio_value"].replace("fs7", "fsw")
+        # for conv in convs:
+        #     conv["audio_value"] = conv["audio_value"].replace("fs7", "fsw")
 
         # User_Speech
         # user_recording = Recording.from_file(convs[0]['audio_value'])
@@ -101,6 +119,8 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
         #     instructions.append(convs[0]["text_value"])
         # else:
         #     instructions.append("")
+        # instructions.append(line['system'])
+        instructions.append(line['conversations'][0]['original_manifest']['raw_data']['ctxs'][0]['text'])
 
         # Language source
         if "lang" in convs[0]:
@@ -111,13 +131,16 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
         # Loading agent audio and using only the extracted features as nd.array
         # target_recordings.append(Recording.from_file(convs[1]['value']))
         # target_recordings.append(Recording.from_file(convs[1]['audio_value']))
-        # target_recordings.append(Recording.from_file(os.path.join(audio_dir, convs[1]['audio_value'])))
+        # if audio_dir not in convs[1]['audio_value']:
+        # if not convs[1]['audio_value'].startswith(audio_dir):
+        #     target_recordings.append(Recording.from_file(os.path.join(audio_dir, convs[1]['audio_value'])))
+        # else:
+        #     target_recordings.append(Recording.from_file(convs[1]['audio_value']))
         
         # Agent answer transcript
         # answer_list.append(convs[1]["transcript"])
         # answer_list.append(convs[1]["text_value"])
         # answer_list.append(convs[1]["value_normalized"])
-
         # Language target
         # if "lang" in convs[1]:
         #     target_language.append(convs[1]["lang"])
@@ -125,8 +148,10 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
         #     target_language.append("EN")
 
     print("Done extracting data from manifest")
-    print(len(user_recordings))
+    # print(f"# user recordings: {len(user_recordings)}")
+    
     cuts = CutSet.from_manifests(recordings=RecordingSet.from_recordings(user_recordings))
+    print(f"# cuts: {len(cuts)}")
 
     unequal = 0
     # Attach text
@@ -134,40 +159,76 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
         user_audio = np.array([[]])
         agent_audio = np.array([[]])
         total_dur = 0
+        
+        # add system instruction
+        cut.supervisions.append(
+                SupervisionSegment(
+                    id=cut.id,
+                    recording_id=cut.id,
+                    start=0,
+                    duration=0, #cut.recording.duration,
+                    text=instructions[j],
+                    speaker="system", 
+                    language="EN",
+                ),
+            )
+
         # convs = in_manifest[j]["conversations"]
         convs = valid_manifest[j]["conversations"]
-        # for i in range(0, len(convs), 2):
-        for i in range(len(convs)):
-            # if i + 1 == len(convs): #skip last turn if there is no agent response
-            #     continue
+        if len(convs) % 2 != 0:
+            num_even_convs = len(convs) - 1
+            assert convs[-1]['from'] == 'user'
+        else:
+            num_even_convs = len(convs)
+
+        turn_silence_sec = 0 #0.32
+        silence_padding = np.zeros((1, int(turn_silence_sec * sample_rate)))
+        # overlap_sec = overlap #1.28 #0.64
+        overlap_samples = int(overlap_sec*sample_rate)
+        for i in range(0, num_even_convs, 2):
+            if i + 1 == len(convs): #skip last turn if there is no agent response
+                continue
             # if i != 0 : # overlap this turn with previos one
             #     total_dur -= 0.64 # sec
             # ipdb.set_trace()
-            turn_silence_sec = 0 #0.32
-            silence_padding = np.zeros((1, int(turn_silence_sec * sample_rate)))
-            # overlap_sec = overlap #1.28 #0.64
-            overlap_samples = int(overlap_sec*sample_rate)
-            # ipdb.set_trace()
-            assert convs[i]['from'] == 'user'
-            # assert convs[i+1]['from'] == 'Assistant'
-            user_duration = Recording.from_file(os.path.join(audio_dir, convs[i]['audio_value'].split("/")[-1])).duration
-            # sample_rate = Recording.from_file(os.path.join(audio_dir, convs[i + 1]['audio_value'])).sampling_rate
-            sample_rate = Recording.from_file(os.path.join(audio_dir, convs[i]['audio_value'].split("/")[-1])).sampling_rate
-            # agent_duration = Recording.from_file(os.path.join(audio_dir, convs[i + 1]['audio_value'])).duration
-            agent_duration = 0
-            cur_user_audio = Recording.from_file(os.path.join(audio_dir, convs[i]['audio_value'].split("/")[-1])).resample(sample_rate).load_audio()
-            # cur_agent_audio = Recording.from_file(os.path.join(audio_dir, convs[i + 1]['audio_value'])).load_audio()
-            cur_agent_audio = np.zeros_like(cur_user_audio)
-            # ipdb.set_trace()
-            user_audio = np.concatenate([user_audio, cur_user_audio, 0 * cur_agent_audio], axis=1)
-            agent_audio = np.concatenate([agent_audio, 0 * cur_user_audio, cur_agent_audio], axis=1)
+            # turn_silence_sec = 0 #0.32
+            # silence_padding = np.zeros((1, int(turn_silence_sec * sample_rate)))
+            # # overlap_sec = overlap #1.28 #0.64
+            # overlap_samples = int(overlap_sec*sample_rate)
+            try:
+                assert convs[i]['from'] == 'user'
+                assert convs[i+1]['from'] == 'assistant'
+            except:
+                ipdb.set_trace()
             
+            user_duration = Recording.from_file(os.path.join(audio_dir, convs[i]['audio_value'].split("/")[-1])).duration
+            sample_rate = Recording.from_file(os.path.join(audio_dir, convs[i]['audio_value'].split("/")[-1])).sampling_rate
+            cur_user_audio = Recording.from_file(os.path.join(audio_dir, convs[i]['audio_value'].split("/")[-1])).resample(sample_rate).load_audio()
+            
+            try:
+                if 'audio_value' in convs[i + 1] and convs[i + 1]['audio_value'] != '' and convs[i + 1]['audio_value'] != None:
+                    agent_duration = Recording.from_file(os.path.join(audio_dir, convs[i + 1]['audio_value'].split("/")[-1])).duration
+                    cur_agent_audio = Recording.from_file(os.path.join(audio_dir, convs[i + 1]['audio_value'].split("/")[-1])).load_audio()
+                else:
+                    agent_duration = 0
+                    cur_agent_audio = np.zeros((1, 0))
+            except:
+                ipdb.set_trace()
+            
+            # user_audio = np.concatenate([user_audio, cur_user_audio, 0 * cur_agent_audio], axis=1)
+            # agent_audio = np.concatenate([agent_audio, 0 * cur_user_audio, cur_agent_audio], axis=1)
             if i != 0 : # overlap this turn with previos one
                 user_audio = user_audio[:, :-overlap_samples]
                 total_dur -= overlap_sec
+            user_audio = np.concatenate([user_audio, cur_user_audio, silence_padding, 0 * cur_agent_audio], axis=1)
+            user_duration += turn_silence_sec
+
+            if i != 0:
+                agent_audio = np.concatenate([agent_audio, 0 * cur_user_audio[:, :-overlap_samples], silence_padding, cur_agent_audio], axis=1)
+            else:
+                agent_audio = np.concatenate([agent_audio, 0 * cur_user_audio, silence_padding, cur_agent_audio], axis=1)
+            # agent_duration += turn_silence_sec
             
-            # user_audio = np.concatenate([user_audio, cur_user_audio, silence_padding, 0 * cur_agent_audio], axis=1)
-            # user_duration += turn_silence_sec
 
             cut.supervisions.append(
                 SupervisionSegment(
@@ -175,9 +236,6 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
                     recording_id=cut.id,
                     start=total_dur,
                     duration=user_duration,
-                    # text=convs[i]["instruction"],
-                    # text=convs[i]["text_value"],
-                    # text=convs[i]["value_normalized"],
                     text=convs[i]["normalized_text_value"],
                     speaker=convs[i]["from"],
                     language="EN",
@@ -189,37 +247,87 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
                     recording_id=cut.id,
                     start=total_dur + user_duration,
                     duration=agent_duration,
-                    # text=convs[i + 1]["transcript"],
-                    # text=convs[i + 1]["text_value"],
+                    text=convs[i + 1]["normalized_text_value"],
+                    speaker=convs[i + 1]["from"],
+                    language="EN",
+                ),
+            )
+            total_dur += user_duration + agent_duration
+        
+        # ipdb.set_trace()
+        if num_even_convs < len(convs): # last turn is from user
+            user_duration = Recording.from_file(os.path.join(audio_dir, convs[-1]['audio_value'].split("/")[-1])).duration
+            sample_rate = Recording.from_file(os.path.join(audio_dir, convs[-1]['audio_value'].split("/")[-1])).sampling_rate
+            cur_user_audio = Recording.from_file(os.path.join(audio_dir, convs[-1]['audio_value'].split("/")[-1])).resample(sample_rate).load_audio()
+            
+            cur_agent_audio = np.zeros_like(cur_user_audio)
+            agent_duration = user_duration
+            # ipdb.set_trace()
+            user_audio = np.concatenate([user_audio, cur_user_audio, silence_padding, 0 * cur_agent_audio], axis=1)
+            user_duration += turn_silence_sec
+            agent_audio = np.concatenate([agent_audio, 0 * cur_user_audio[:, :-overlap_samples], silence_padding, cur_agent_audio], axis=1)
+
+            cut.supervisions.append(
+                SupervisionSegment(
+                    id=cut.id,
+                    recording_id=cut.id,
+                    start=total_dur,
+                    duration=user_duration,
+                    text=convs[-1]["normalized_text_value"],
+                    speaker=convs[-1]["from"],
+                    language="EN",
+                ),
+            )
+            cut.supervisions.append(
+                SupervisionSegment(
+                    id=cut.id,
+                    recording_id=cut.id,
+                    start=total_dur + user_duration,
+                    duration=agent_duration,
                     text="",
                     speaker="assistant",
                     language="EN",
                 ),
             )
             total_dur += user_duration + agent_duration
-            # total_dur += user_duration
+
         cut.duration = total_dur
         cut.start = 0.0
+        # ipdb.set_trace()
+        try:
+            assert user_audio.shape == agent_audio.shape
+        except:
+            # ipdb.set_trace()
+            if user_audio.shape < agent_audio.shape:
+                unequal += 1
+                diff = agent_audio.shape[1] - user_audio.shape[1]
+                user_audio = np.concatenate([user_audio, np.zeros((1, diff))], axis=1) # add silence
+            else:
+                unequal += 1
+                diff = user_audio.shape[1] - agent_audio.shape[1]
+                agent_audio = np.concatenate([agent_audio, np.zeros((1, diff))], axis=1) # add silence
+            assert user_audio.shape == agent_audio.shape
         
-        # try:
-        #     assert user_audio.shape == agent_audio.shape
-        # except:
-        #     # ipdb.set_trace()
-        #     assert user_audio.shape < agent_audio.shape
-        #     unequal += 1
-        #     diff = agent_audio.shape[1] - user_audio.shape[1]
-        #     user_audio = np.concatenate([user_audio, np.zeros((1, diff))], axis=1) # add silence
-        #     assert user_audio.shape == agent_audio.shape
 
         save_audio(f"/tmp/u{j}1.wav", user_audio, sample_rate)
         cut.recording = Recording.from_file(f"/tmp/u{j}1.wav")
         save_audio(f"/tmp/u{j}2.wav", agent_audio, sample_rate)
         cut.target_audio = Recording.from_file(f"/tmp/u{j}2.wav")
-        
+        # ipdb.set_trace()
+        # user_stream = BytesIO()
+        # agent_stream = BytesIO()
+        # save_audio(dest=user_stream, src=user_audio, sampling_rate=sample_rate, format="wav")
+        # save_audio(dest=agent_stream, src=agent_audio, sampling_rate=sample_rate, format="wav")
+        # user_stream.seek(0)
+        # agent_stream.seek(0)
+        # cut.recording = Recording.from_bytes(user_stream.getvalue(), f"{cut.id}_user")
+        # cut.target_audio = Recording.from_bytes(agent_stream.getvalue(), f"{cut.id}_agent")
     
     print(f"unequal examples: {unequal}")
 
     print("...Making Shars")
+    print(f"# of cuts: {len(list(cuts))}")
+
     out_shar_dir = Path(out_shar_dir)
     out_shar_dir.mkdir(parents=True, exist_ok=True)
     shard_size = shard_size
@@ -259,12 +367,12 @@ def main():
     parser.add_argument(
         '--overlap',
         type=float,
-        default=0.64,
+        default=0, #0.64,
     )
     parser.add_argument(
         '--audio_dir',
         type=str,
-        default="/lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/processed_datasets",
+        default=None, #"/lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/processed_datasets",
     )
 
     args = parser.parse_args()

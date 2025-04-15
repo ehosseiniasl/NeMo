@@ -1,0 +1,1604 @@
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: megatron_audio_gpt_s2s_lhotse
+
+trainer:
+  devices: 1
+  accelerator: gpu
+  num_nodes: 1
+  precision: bf16
+  logger: False # logger provided by exp_manager
+  enable_checkpointing: False
+  use_distributed_sampler: False
+  max_epochs: 9999
+  max_steps: 1000000 # consumed_samples = global_step * micro_batch_size * data_parallel_size * accumulate_grad_batches
+  limit_train_batches : 1000000
+  log_every_n_steps: 10 # frequency with which training steps are logged 
+  val_check_interval: 1000 # If is an int n > 1, will run val every n training steps, if a float 0.0 - 1.0 will run val every epoch fraction, e.g. 0.25 will run val every quarter epoch
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+
+model_target: nemo.collections.multimodal.speech_llm.models.modular_s2s_models.S2sModularAudioGPTModel
+
+exp_manager:
+  # explicit_log_dir: null
+  exp_dir: null
+  name: ${name}
+  create_wandb_logger: False
+  wandb_logger_kwargs:
+    project: null
+    name: null
+  resume_if_exists: True
+  resume_ignore_no_checkpoint: True
+  create_checkpoint_callback: True
+  checkpoint_callback_params:
+    monitor: validation_${model.data.validation_ds.metrics[0].name}
+    save_top_k: 1
+    mode: min
+    save_nemo_on_train_end: True
+    filename: '${name}--{${exp_manager.checkpoint_callback_params.monitor}:.3f}-{step}-{epoch}'
+    model_parallel_size: ${model.tensor_model_parallel_size}
+    always_save_nemo: False
+    save_best_model: True
+  create_early_stopping_callback: False
+  early_stopping_callback_params:
+    monitor: "val_loss"
+    mode: "min"
+    min_delta: 0.001
+    patience: 10
+    verbose: True
+    strict: False # Should be False to avoid a runtime error where EarlyStopping says monitor is unavailable, which sometimes happens with resumed training.
+
+
+model:
+  # TBD:
+  salm_model_path: ???
+  speech_pad_id: 2001
+  speech_unk_id: 2002
+  speech_bos_id: 2003
+  speech_eos_id: 2004
+  speech_nosil_id: 2005
+  # proj_head_dims[0] should be set to LLM vocab size (32k below)
+  # proj_head_dims[1:] should be set to nemo codec vocab size (1024 below)
+  proj_head_dims: [32000, 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048]
+  s2s_vocab_size: 48384 # This should be equal to the proj_head_dims[0] + decoder_reduction_factor * sum(proj_head_dims[1:])
+  proj_head_loss_weights: [1, 1, 1, 1, 1, 1, 1, 1, 1]
+  decoder_reduction_factor: 1
+
+  seed: 1234
+  tensor_model_parallel_size: 1 # intra-layer model parallelism
+  pipeline_model_parallel_size: 1 # inter-layer model parallelism
+  
+  pretrained_audio_model: stt_en_fastconformer_transducer_large
+  freeze_llm: True
+  freeze_audio_encoder: False
+  freeze_modality_adapter: False
+  load_audio_encoder: True
+
+  ## Legacy batch_size configuration
+  # When used with lhotse, the batch composition is decided by dataloader configs
+  # and batch size here is only used for deciding gradient accumulation.
+  # gradient accumulation = global_batch_size / micro_batch_size / data_parallel_size
+  # where data_parallel_size = num_nodes * num_gpus / TP_size
+  global_batch_size: 128
+  micro_batch_size: 4
+  restore_from_path: ??? # Path to an existing .nemo model you wish to add new tasks to or run inference with
+  resume_from_checkpoint: null # The path to a checkpoint file to continue the training, restores the whole state including the epoch, step, LR schedulers, apex, etc.
+  save_nemo_on_validation_end: False # Saves an inference ready .nemo file every time a checkpoint is saved during training. 
+  sync_batch_comm: False
+  megatron_amp_O2: False
+
+  ## Sequence Parallelism
+  # Makes tensor parallelism more memory efficient for LLMs (20B+) by parallelizing layer norms and dropout sequentially
+  # See Reducing Activation Recomputation in Large Transformer Models: https://arxiv.org/abs/2205.05198 for more details.
+  sequence_parallel: False
+
+  ## Activation Checkpoint 
+  activations_checkpoint_granularity: null # 'selective' or 'full' 
+  activations_checkpoint_method: null # 'uniform', 'block', not used with 'selective'
+  # 'uniform' divides the total number of transformer layers and checkpoints the input activation
+  # of each chunk at the specified granularity
+  # 'block' checkpoints the specified number of layers per pipeline stage at the specified granularity
+  activations_checkpoint_num_layers: null # not used with 'selective'
+  activations_checkpoint_layers_per_pipeline: null
+  answer_only_loss: True
+  gradient_as_bucket_view: False
+
+  hidden_dropout: 0.0
+  attention_dropout: 0.0
+  ffn_dropout: 0.0
+
+  extract_codec_on_the_fly: True
+  codec_model_downsampling_factor: 1024
+
+  # use_am_tokenizer: True
+  # for MegatronNMTMultiProjModel and datasets
+
+  peft:
+    peft_scheme: "lora"  # can be either lora, adapter, ia3 or ptuning
+    restore_from_path: null
+    
+    # Used for adapter peft training
+    adapter_tuning:
+      type: 'parallel_adapter' # this should be either 'parallel_adapter' or 'linear_adapter'
+      adapter_dim: 32
+      adapter_dropout: 0.0
+      norm_position: 'pre' # This can be set to 'pre', 'post' or null, 'pre' is normally what is used.
+      column_init_method: 'xavier' # IGNORED if linear_adapter is used, options: xavier, zero or normal
+      row_init_method: 'zero' # IGNORED if linear_adapter is used, options: xavier, zero or normal
+      norm_type: 'mixedfusedlayernorm' # IGNORED if layer_adapter is used,  options are ['layernorm', 'mixedfusedlayernorm']
+      layer_selection: null  # selects in which layers to add adapters, e.g. [1,12] will add adapters to layer 1 (lowest) and 12. null will apply adapters to all layers
+      weight_tying: False
+      position_embedding_strategy: null # used only when weight_tying is True
+
+    lora_tuning:
+      target_modules: ['attention_qkv','attention_dense','mlp_fc1','mlp_fc2'] # this can either be 'attention_qkv','attention_dense','mlp_fc1','mlp_fc2', attention (qkv & dense), mlp (fc1 & fc2)
+      adapter_dim: 32
+      alpha: ${model.peft.lora_tuning.adapter_dim} 
+      adapter_dropout: 0.0
+      column_init_method: 'xavier' # IGNORED if linear_adapter is used, options: xavier, zero or normal
+      row_init_method: 'zero' # IGNORED if linear_adapter is used, options: xavier, zero or normal
+      layer_selection:  null  # selects in which layers to add lora adapters. e.g. [1,12] will add lora to layer 1 (lowest) and 12. null will apply adapters to all layers
+      weight_tying: False
+      position_embedding_strategy: null # used only when weight_tying is True
+
+    # Used for p-tuning peft training
+    p_tuning:
+      virtual_tokens: 10  # The number of virtual tokens the prompt encoder should add at the start of the sequence
+      bottleneck_dim: 1024  # the size of the prompt encoder mlp bottleneck
+      embedding_dim: 1024  # the size of the prompt encoder embeddings
+      init_std: 0.023
+
+  perception:
+    target: nemo.collections.multimodal.speech_llm.modules.perception_modules.AudioPerceptionModule
+    use_multi_layer_feat: false
+    multi_layer_feat:
+      layer_idx_list: [0,16]  # layer indices to extract features from
+      aggregator:
+        mode: "cat"  # ways to combine features from different layers, choices=['cat','sum','mean', 'max', 'min'], default to concat ('cat')
+        pooling: "avg"  # ways to pool features if they have different temporal lengths and align_mode=min, choices=['mean', 'max', 'min']
+        align_mode: "min"  # if features have different temporal lengths, set `min` to pool to the shortest length or `max` to repeat to the longest.
+
+    modality_adapter: 
+      _target_: nemo.collections.asr.modules.ConformerEncoder
+      feat_in: 1024
+      feat_out: -1 # you may set it if you need different output size other than the default d_model
+      n_layers: 2
+      d_model: 512
+
+      # Sub-sampling parameters
+      subsampling: dw_striding # vggnet, striding, stacking or stacking_norm, dw_striding
+      subsampling_factor: 8 # must be power of 2 for striding and vggnet
+      subsampling_conv_channels: 256 # set to -1 to make it equal to the d_model
+      causal_downsampling: false
+
+      # Reduction parameters: Can be used to add another subsampling layer at a given position.
+      # Having a 2x reduction will speedup the training and inference speech while keeping similar WER.
+      # Adding it at the end will give the best WER while adding it at the beginning will give the best speedup.
+      reduction: null # pooling, striding, or null
+      reduction_position: null # Encoder block index or -1 for subsampling at the end of encoder
+      reduction_factor: 1
+
+      # Feed forward module's params
+      ff_expansion_factor: 4
+
+      # Multi-headed Attention Module's params
+      self_attention_model: rel_pos # rel_pos or abs_pos
+      n_heads: 8 # may need to be lower for smaller d_models
+      # [left, right] specifies the number of steps to be seen from left and right of each step in self-attention
+      att_context_size: [-1, -1] # -1 means unlimited context
+      att_context_style: regular # regular or chunked_limited
+      xscaling: true # scales up the input embeddings by sqrt(d_model)
+      untie_biases: true # unties the biases of the TransformerXL layers
+      pos_emb_max_len: 5000
+
+      # Convolution module's params
+      conv_kernel_size: 9
+      conv_norm_type: 'batch_norm' # batch_norm or layer_norm or groupnormN (N specifies the number of groups)
+      # conv_context_size can be"causal" or a list of two integers while conv_context_size[0]+conv_context_size[1]+1==conv_kernel_size
+      # null means [(kernel_size-1)//2, (kernel_size-1)//2], and 'causal' means [(kernel_size-1), 0]
+      conv_context_size: null
+
+      ### regularization
+      dropout: 0.1 # The dropout used in most of the Conformer Modules
+      dropout_pre_encoder: 0.1 # The dropout used before the encoder
+      dropout_emb: 0.0 # The dropout used for embeddings
+      dropout_att: 0.1 # The dropout for multi-headed attention modules
+
+      # set to non-zero to enable stochastic depth
+      stochastic_depth_drop_prob: 0.0
+      stochastic_depth_mode: linear  # linear or uniform
+      stochastic_depth_start_layer: 1
+
+    spec_augment:
+      _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+      freq_masks: 2 # set to zero to disable it
+      time_masks: 10 # set to zero to disable it
+      freq_width: 27
+      time_width: 0.05
+
+    # the following are read from the pretrained AM:
+    # output_dim: null
+    # encoder: null
+    # preprocessor: null
+
+  codec_model_path: ???
+  asr_model_path: "stt_en_fastconformer_transducer_large"
+
+  data:
+    end_string: ""
+    train_ds:
+      multi_config: true
+      use_lhotse: True
+      seed: 'trng'
+      shuffle: true
+      shard_seed: "trng"
+      sampler_fusion: randomized_round_robin
+      sampler_weights:
+        blackwell: 1.0 #0.005
+        sft: 1.0 # 0.02
+        functioncall: 1.0
+        duplex: 1.0
+        sqa: 1.0
+
+      blackwell:
+        input_cfg:
+        - type: group
+          input_cfg:
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell/
+            tags:
+              s2s_duplex_overlap: True
+              speaker_id: 1
+
+      # sys_prompt:
+      #   input_cfg:
+      #   - type: group
+      #     input_cfg:
+      #     - type: lhotse_shar
+      #       shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn/
+      #       tags:
+      #         s2s_duplex: True
+      #         include_sys: True
+      #         speaker_id: 1
+      
+      functioncall: 
+        input_cfg:
+        - type: group
+          tags:
+            s2s_duplex_functioncalling: True
+          input_cfg:
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+respond_train
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+refusal_train
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+refusal_train
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.00/even_toolcall_response/xlam-functioncalling+paralleltoolcall
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.00/even_toolcall_response/xlam-functioncalling+toolcall
+
+      sft: 
+        input_cfg:
+        - type: group
+          tags:
+            s2s_duplex_system: True
+          input_cfg:
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_8.54_lmsys_noredact_nowordcnt_iter0_3p_iter1_6p_repeat10.reward6p1_part_00
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_8.54_lmsys_noredact_nowordcnt_iter0_3p_iter1_6p_repeat10.reward6p1_part_01
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_8.54_synth_v2_sft_repeat10.reward6p1
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/340b_and_qwen_7b_math_and_gsm8k.sft.all.fewshot3
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/complex_instruction_v2_t3
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/finqa
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/lm_identity
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/lmsys_instruction_following_340b_854
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/lmsys_instruction_following_340b_instruct
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/mmlu_training_set
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/moa_lmsys_noredact_sft_90k_reward5.5p
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/open_platypus_commercial
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/openmath2_qwen2.5_7b_MATH_5m
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_multi_turn
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_second_turn
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_single_turn
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_single_turn_v2
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/precise_instruction_following_v4_system_multi_turn
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/rej_sampling_genetic_8x22_prompts
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/safety
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/stay_on_topic
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_incapable_questions
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_json_format_following
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_riddle
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/synthetic_roleplay_v2
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/trimmed_assistant/overlap_0.64/vendor_sft_1.3_all_till_20241120
+          # - type: lhotse_shar
+          #     shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn
+
+      duplex:
+        input_cfg:
+        - type: group
+          weight: 1.0
+          tags:
+            s2s_duplex_system: True
+            speaker_id: 1
+          input_cfg:
+            - type: lhotse_shar
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn
+        
+        shuffle: True
+      
+      sqa:
+        input_cfg:
+        - type: group
+          weight: 1.0
+          tags:
+            s2s_duplex: True
+            speaker_id: 1
+          input_cfg:
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_0
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_1
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_2
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_3
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_4
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_5
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_6
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_7
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_8
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_9
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_10
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_11
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_12
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_13
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_14
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_15
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_16
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_17
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_18
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_19
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_20
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_21
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_22
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_23
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_24
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_25
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_26
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_27
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_28
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_29
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_30
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_31
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_32
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_33
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_34
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_35
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_36
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_37
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_38
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_39
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_40
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_41
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_42
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_43
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_44
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_45
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_46
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_47
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_48
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_49
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_50
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_51
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_52
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_53
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_54
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_55
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_56
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_57
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_58
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_59
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_60
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_61
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_62
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_63
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_64
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_65
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_66
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_67
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_68
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_69
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_70
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_71
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_72
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_73
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_74
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_75
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_76
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_77
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_78
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_79
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_80
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_81
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_82
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_83
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_84
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_85
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_86
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_87
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_88
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_89
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_90
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_91
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_92
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_93
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_94
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_95
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_96
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_97
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_98
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_99
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_100
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_101
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_102
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_103
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_104
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_105
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_106
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_107
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_108
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_109
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_110
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_111
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_112
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_113
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_114
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_115
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_116
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_117
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_118
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_119
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_120
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_121
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_122
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_123
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_124
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_125
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_126
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_127
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_128
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_129
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_130
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_131
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_132
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_133
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_134
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_135
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_136
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_137
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_138
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_139
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_140
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_141
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_142
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_143
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_144
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_145
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_146
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_147
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_148
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_149
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_150
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_151
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_152
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_153
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_154
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_155
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_156
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_157
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_158
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_159
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_160
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_161
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_162
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_163
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_164
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_165
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_166
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_167
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_168
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_169
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_170
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_171
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_172
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_173
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_174
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_175
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_176
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_177
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_178
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_179
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_180
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_181
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_182
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_183
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_184
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_185
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_186
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_187
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_188
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_189
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_190
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_191
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_192
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_193
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_194
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_195
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_196
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_197
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_198
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_199
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_200
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_201
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_202
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_203
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_204
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_205
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_206
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_207
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_208
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_209
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_210
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_211
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_212
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_213
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_214
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_215
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_216
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_217
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_218
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_219
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_220
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_221
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_222
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_223
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_224
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_225
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_226
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_227
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_228
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_229
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_230
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_231
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_232
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_233
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_234
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_235
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_236
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_237
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_238
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_239
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_240
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_241
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_242
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_243
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_244
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_245
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_246
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_247
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_248
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_249
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_250
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_251
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_252
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_253
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_254
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_255
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_256
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_257
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_258
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_259
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_260
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_261
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_262
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_263
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_264
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_265
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_266
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_267
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_268
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_269
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_270
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_271
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_272
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_273
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_274
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_275
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_276
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_277
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_278
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_279
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_280
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_281
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_282
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_283
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_284
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_285
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_286
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_287
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_288
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_289
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_290
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_291
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_292
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_293
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_294
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_295
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_296
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_297
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_298
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_299
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_300
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_301
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_302
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_303
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_304
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_305
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_306
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_307
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_308
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_309
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_310
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_311
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_312
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_313
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_314
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_315
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_316
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_317
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_318
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_319
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_320
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_321
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_322
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_323
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_324
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_325
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_326
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_327
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_328
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_329
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_330
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_331
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_332
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_333
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_334
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_335
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_336
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_337
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_338
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_339
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_340
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_341
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_342
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_343
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_344
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_345
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_346
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_347
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_348
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_349
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_350
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_351
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_352
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_353
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_354
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_355
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_356
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_357
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_358
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_359
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_360
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_361
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_362
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_363
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_364
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_365
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_366
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_367
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_368
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_369
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_370
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_371
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_372
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_373
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_374
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_375
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_376
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_377
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_378
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_379
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_380
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_381
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_382
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_383
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_384
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_385
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_386
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_387
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_388
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_389
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_390
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_391
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_392
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_393
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_394
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_395
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_396
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_397
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_398
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_399
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_400
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_401
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_402
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_403
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_404
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_405
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_406
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_407
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_408
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_409
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_410
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_411
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_412
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_413
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_414
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_415
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_416
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_417
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_418
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_419
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_420
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_421
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_422
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_423
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_424
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_425
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_426
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_427
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_428
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_429
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_430
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_431
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_432
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_433
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_434
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_435
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_436
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_437
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_438
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_439
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_440
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_441
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_442
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_443
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_444
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_445
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_446
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_447
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_448
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_449
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_450
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_451
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_452
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_453
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_454
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_455
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_456
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_457
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_458
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_459
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_460
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_461
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_462
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_463
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_464
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_465
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_466
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_467
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_468
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_469
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_470
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_471
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_472
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_473
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_474
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_475
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_476
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_477
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_478
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_479
+          # - type: lhotse_shar
+          #   shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_480
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_481
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_482
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_483
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_484
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_485
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_486
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_487
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_488
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_489
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_490
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_491
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_492
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_493
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_494
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_495
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_496
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_497
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_498
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_499
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_500
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_501
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_502
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_503
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_504
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_505
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_506
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_507
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_508
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_509
+          - type: lhotse_shar
+            shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SpeechQA/Mixtral8x22b_MMLPC_en/emma_synthesized_manifests/s2s_shar/manifest_510
+        shuffle: True
+          
+      load_answer_audio: ${model.extract_codec_on_the_fly}
+      codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
+      global_batch_size: ${model.global_batch_size}
+      micro_batch_size: ${model.micro_batch_size}
+      num_workers: 0
+      pin_memory: True
+      max_seq_length: 512
+      min_seq_length: 1
+      drop_last: True
+      # Notably, the data weights are controlled by either bucketing_weights
+      # or concat_sampling_probabilities depending on the dataset type (tar and
+      # non-tar).
+      # See audio_text_qa_dataset.py for details.
+      concat_sampling_probabilities: null # When providing a list of datasets, this arg defines the sampling probabilities from each dataset when strategy='random'
+      context_key: 'context'
+      ali_score_key: 'ali_score'
+      answer_key: 'answer'
+      add_eos: True
+      # add_eos: False
+      end_string: ${model.data.end_string}
+      add_sep: False
+      add_bos: False
+      separate_prompt_and_response_with_newline: False
+      truncation_field: "context" # Options: ['context', 'answer']
+      index_mapping_dir: null # Path to a directory to write index mapping files.
+      # prompt_template: "{context}\n{answer}" # fstring to use for assistant prompt. Example: "Q: {input}\nA: {output}"
+      prompt_template: "[INST]\n<<SYS>>\nPlease answer the following based on the previous speech feature.\n<</SYS>>\n\n{context}[/INST] {answer}"
+      speech_pad_id: ${model.speech_pad_id}
+      speech_unk_id: ${model.speech_unk_id}
+      speech_bos_id: ${model.speech_bos_id}
+      speech_eos_id: ${model.speech_eos_id}
+      speech_nosil_id: ${model.speech_nosil_id}
+      filter_by_source_target_text_ratio: False # If the length of the source and target texts differ too much, the instance will be discarded
+      source_target_text_ratio_limit: 4.0
+      # ASR configs
+      sample_rate: 16000 #${model.audio_encoder.preprocessor.sample_rate}
+      max_duration: 24 # it is set for LibriSpeech, you may need to update it for your dataset
+      min_duration: 0.1
+      # tarred datasets
+      is_tarred: false
+      # tarred_audio_filepaths: null
+      shuffle_n: 2048
+      # bucketing params
+      bucketing_strategy: "fully_randomized"
+      bucketing_batch_size: null
+      text_field : "text"
+      batch_duration : 80  # 0
+      quadratic_duration : 30
+      num_buckets : 30
+      buffer_size : 10000
+      shuffle_buffer_size : 10000
+      duration_bins: null
+
+    validation_ds:
+      force_map_dataset: True
+      names: ['roleplay','nvolve_chatqa', 'daring_anteater_lmsys_sft', 'ultrachat', 'topic', 'nvolve_multiturn', 'nvolve_multiturn_sys', 'glaive_fc']
+      # names: ['roleplay']
+      # names: ['glaive_fc']
+      input_cfg:
+        - type: group
+          weight: 1.0
+          tags:
+            lang: en
+          input_cfg:
+            # - type: lhotse_shar
+            #   shar_path: /lustre/fs7/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/s2s_synthetic_data/s2s_shars_21fps/squadv2/ # speech SQA
+            #   weight: 0.1
+            #   tags:
+            #     lang: en
+            #     s2s: True
+            #- type: lhotse_shar
+            #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/Mixtral8x22b_MMLPC_en/manifest_511/
+            #  tags:
+            #    s2s_duplex: True
+            - type: lhotse_shar #this
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/synthetic_roleplay_v2_test/
+              tags:
+                s2s_duplex: True
+                #- type: lhotse_shar
+                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/tts/Lindy_dev/
+                #  tags:
+                #    s2s_duplex: True
+                #- type: lhotse_shar
+                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/s2s_synthetic_data/Mixtral8x22b_MMLPC_en/emma_lhotse_shars/normalized_manifest_511
+                #  tags:
+                #    s2s_duplex: True
+            - type: lhotse_shar # this
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/nvolve_chatqa_test/
+              tags:
+                s2s_duplex: True
+            - type: lhotse_shar #this
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/340b_8.19_daring_anteater_lmsys_sft_8801rm3.7p_test/
+              tags:
+                s2s_duplex: True
+                #- type: lhotse_shar
+                #  shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/blackwell_test/
+                #  tags:
+                #    s2s_duplex_overlap: True
+            - type: lhotse_shar #this
+              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/ultrachat/shar_duplex/manifest_000019
+              tags:
+                s2s_duplex: True
+            - type: lhotse_shar #this
+              shar_path: /lustre/fsw/portfolios/llmservice/users/kevinhu/duplex/topic_v2/Meta-Llama-3.1-70B-Instruct/shar_duplex/manifest_000050
+              tags:
+                s2s_duplex: True 
+            - type: lhotse_shar #this
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn_test/
+              tags:
+                s2s_duplex: True 
+            - type: lhotse_shar # this
+              shar_path: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/duplex/brainy_mantis/emma_trimmed_overlap_0.64/nvolve_multiturn_test/
+              tags:
+                # s2s_duplex_functioncalling: True 
+                s2s_duplex_system: True 
+            - type: lhotse_shar # this
+              shar_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_riva_rivamlops/data/ALM/SFT/brainy_mantis/duplex_s2s_shars/overlap_0.00/even_toolcall_response/glaive-functioncalling-v2+toolcall+respond_test
+              tags:
+                s2s_duplex_functioncalling: True 
+
+
+            # s2s_shars_21fps_with_wavs
+            # - type: lhotse_shar
+            #   shar_path: /lustre/fs7/portfolios/llmservice/projects/llmservice_nemo_speechlm/data/s2s_synthetic_data/s2s_shars_21fps/alpaca_val/ # speech SQA
+            #   weight: 0.1
+            #   tags:
+            #     lang: en
+            #     s2s: True
+          
+      load_answer_audio: ${model.extract_codec_on_the_fly}
+      codec_model_downsampling_factor: ${model.codec_model_downsampling_factor}
+      global_batch_size: ${model.global_batch_size}
+      micro_batch_size: ${model.micro_batch_size}
+      shuffle: False
+      num_workers: 0
+      pin_memory: True
+      max_seq_length: 512
+      min_seq_length: 1
+      drop_last: False
+      context_key: ${model.data.train_ds.context_key}
+      ali_score_key: ${model.data.train_ds.ali_score_key}
+      answer_key: ${model.data.train_ds.answer_key}
+      add_eos: ${model.data.train_ds.add_eos}
+      end_string: ${model.data.end_string}
+      add_sep: ${model.data.train_ds.add_sep}
+      add_bos: ${model.data.train_ds.add_bos}
+      separate_prompt_and_response_with_newline: ${model.data.train_ds.separate_prompt_and_response_with_newline}
+      write_predictions_to_file: True
+      output_file_path_prefix: null # Prefix of the file to write predictions to.
+      truncation_field: "context" # Options: ['context', 'answer']
+      index_mapping_dir: null # Path to a directory to write index mapping files.
+      prompt_template: ${model.data.train_ds.prompt_template} # fstring to use for assistant prompt. Example: "Q: {input}\nA: {output}"
+      tokens_to_generate: 256
+      speech_pad_id: ${model.speech_pad_id}
+      speech_unk_id: ${model.speech_unk_id}
+      speech_bos_id: ${model.speech_bos_id}
+      speech_eos_id: ${model.speech_eos_id}
+      speech_nosil_id: ${model.speech_nosil_id}
+      filter_by_source_target_text_ratio: False # If the length of the source and target texts differ too much, the instance will be discarded
+      source_target_text_ratio_limit: 4.0
+      # ASR configs
+      sample_rate: 16000 #${model.audio_encoder.preprocessor.sample_rate}
+
+      log_every_n_steps: 10
+      metrics:
+        - name: "loss" # Name of the evaluation metric to use. Options: ['exact_string_match', 'loss']
+          average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
+          num_classes: null
+        - name: "bleu"
+          average: null
+          num_classes: null
+        - name: "asr-bleu"
+          average: null
+          num_classes: null
+        - name: "asr-wer"
+          average: null
+          num_classes: null
+        - name: "mos"
+        - name: "bleu2"
+          average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
+          num_classes: null
+        - name: "turndiff"
+          average: null # Average the metric over the dataset. Options: ['macro', 'micro']. Works only for 'F1', 'accuracy' etc. Refer to torchmetrics for metrics where this is supported.
+          num_classes: null
+        - name: "fc-bleu"
+          average: null
+          num_classes: null
+        - name: "fc-wer"
+          average: null
+          num_classes: null
+
+  optim:
+    name: fused_adam
+    lr: 1e-4
+    weight_decay: 0.01 
+    betas: 
+    - 0.9
+    - 0.98
+    sched:
+      name: CosineAnnealing
+      warmup_steps: 50
+      min_lr: 0.0 # min_lr must be 0.0 for prompt learning when pipeline parallel > 1
+      constant_steps: 0 # Constant steps should also be 0 when min_lr=0
+      monitor: val_loss
+      reduce_on_plateau: false
