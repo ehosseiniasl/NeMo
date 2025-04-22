@@ -49,6 +49,9 @@ def json_reader(filename):
         for line in f:
             yield json.loads(line)
 
+def get_audio(recording, sample_rate):
+    return recording.resample(sample_rate).load_audio()
+
 def create_shards(
     manifest_path: Pathlike,
     output_dir: Pathlike,
@@ -79,7 +82,7 @@ def create_shards(
         print(f"Read {len(in_manifest)} entries from manifest")
 
         # Check if required files exist and clean manifest
-        cleaned_manifest = []
+    cleaned_manifest = []
         excluded_german = 0
         excluded_missing_files = 0
         
@@ -112,7 +115,7 @@ def create_shards(
                 excluded_missing_files += 1
                 continue
                 
-        in_manifest = cleaned_manifest
+    in_manifest = cleaned_manifest
         print(f"Number of valid recordings: {len(in_manifest)}")
         print(f"Number of excluded German transcription examples: {excluded_german}")
         print(f"Number of excluded examples due to missing files: {excluded_missing_files}")
@@ -138,9 +141,9 @@ def create_shards(
                     supervisions=[]
                 )
                 
-                user_audio_list = []
-                agent_audio_list = []
-                total_dur = 0
+        user_audio_list = []
+        agent_audio_list = []
+        total_dur = 0
 
                 # Take 2 from start and 2 from end
                 entries = []
@@ -158,48 +161,70 @@ def create_shards(
                         question_wav = entry.get("question_wav")  # This is optional
                         target_wav = os.path.join(answer_audio_dir, entry["target_wav"])
                         
-                        # Load and concatenate both audio files
-                        user_audio_data, user_sr = sf.read(audio_wav)
+                        # Load and process audio files
+                        user_recording = Recording.from_file(audio_wav)
+                        question_recording = Recording.from_file(question_wav)
                         
-                        # Get question sample rate first
-                        question_sr = None
-                        if question_wav and os.path.exists(question_wav):
-                            _, question_sr = sf.read(question_wav)
-                            # Resample user audio to match question sample rate
-                            user_audio = Recording.from_file(audio_wav)
-                            user_audio = user_audio.resample(question_sr)
-                            user_audio_data = user_audio.load_audio()
-                            user_sr = question_sr  # Update user sample rate
+                        # Get question sample rate
+                        question_sr = question_recording.sampling_rate
                         
-                        # Convert user audio to mono and reshape
+                        # Get resampled user audio
+                        user_audio_data = get_audio(user_recording, question_sr)
+                        # print(f"Initial user audio shape: {user_audio_data.shape} samples at {question_sr}Hz")
+                        # print(f"Initial user audio duration: {user_audio_data.shape[0] / question_sr:.3f}s")
+                        
+                        # Get question audio
+                        question_audio_data = question_recording.load_audio()
+                        # print(f"Initial question audio shape: {question_audio_data.shape} samples at {question_sr}Hz")
+                        # print(f"Initial question audio duration: {question_audio_data.shape[0] / question_sr:.3f}s")
+
+                        # Convert to mono if stereo by taking the first channel
                         if len(user_audio_data.shape) > 1:
-                            user_audio_data = user_audio_data[:, 0]
-                        user_audio_data = user_audio_data.reshape(1, -1)
-                        
-                        # Handle question audio if available
-                        if question_wav and os.path.exists(question_wav):
-                            question_audio_data, _ = sf.read(question_wav)  # We already have the sample rate
-                            # Convert to mono if stereo
-                            if len(question_audio_data.shape) > 1:
-                                question_audio_data = question_audio_data[:, 0]
-                            # Reshape for concatenation
-                            question_audio_data = question_audio_data.reshape(1, -1)
-                            # Concatenate the audio data
-                            user_recording_data = np.concatenate([user_audio_data, question_audio_data], axis=1)
-                        else:
-                            user_recording_data = user_audio_data
+                            user_audio_data = user_audio_data[0, :]  # Take first channel and preserve samples
+                            # print(f"User audio after mono conversion: {user_audio_data.shape} samples")
+                            # print(f"User audio duration after mono: {user_audio_data.shape[0] / question_sr:.3f}s")
+                        if len(question_audio_data.shape) > 1:
+                            question_audio_data = question_audio_data[0, :]  # Take first channel and preserve samples
+                            # print(f"Question audio after mono conversion: {question_audio_data.shape} samples")
+                            # print(f"Question audio duration after mono: {question_audio_data.shape[0] / question_sr:.3f}s")
+
+                        # Calculate expected durations before any reshaping
+                        user_duration = user_audio_data.shape[0] / question_sr
+                        question_duration = question_audio_data.shape[0] / question_sr
+                        expected_duration = user_duration + question_duration
+                        # print(f"Expected durations - User: {user_duration:.3f}s ({user_audio_data.shape[0]} samples), Question: {question_duration:.3f}s ({question_audio_data.shape[0]} samples), Total: {expected_duration:.3f}s")
+
+                        # Concatenate the audio data
+                        user_recording_data = np.concatenate([user_audio_data, question_audio_data])
+                        # print(f"Concatenated audio shape: {user_recording_data.shape} samples")
+                        # print(f"Concatenated audio duration: {user_recording_data.shape[0] / question_sr:.3f}s")
+
+                        # Reshape to (1, n_samples) for saving
+                        user_recording_data = user_recording_data.reshape(1, -1)
+                        # print(f"Final shape for saving: {user_recording_data.shape} samples")
+                        # print(f"Final duration for saving: {user_recording_data.shape[1] / question_sr:.3f}s")
 
                         # Save concatenated user audio
                         user_temp_path = os.path.join(temp_dir, f'user_question_{j}_{entry_idx}.wav')
-                        sf.write(user_temp_path, user_recording_data.T, user_sr)  # Use question's sample rate
+                        sf.write(user_temp_path, user_recording_data.T, question_sr)
                         user_recording = Recording.from_file(user_temp_path)
+                        
+                        # Verify recording duration matches sum of resampled user audio and question audio
+                        if abs(user_recording.duration - expected_duration) > 0.01:  # 10ms tolerance
+                            print(f"Warning: Recording duration mismatch for cut {j}, entry {entry_idx}")
+                            print(f"User audio duration: {user_duration:.3f}s ({user_audio_data.shape[0]} samples)")
+                            print(f"Question audio duration: {question_duration:.3f}s ({question_audio_data.shape[0]} samples)")
+                            print(f"Expected total duration: {expected_duration:.3f}s")
+                            print(f"Actual recording duration: {user_recording.duration:.3f}s")
+                            print(f"Sample rate: {question_sr}Hz")
+                            print(f"Concatenated audio shape: {user_recording_data.shape}")
+                            print(f"Saved audio shape: {user_recording.load_audio().shape}")
 
                         # Load and process agent audio
                         agent_audio_data, agent_sr = sf.read(target_wav)
                         
                         # Verify that question and agent sample rates match
-                        if question_wav and os.path.exists(question_wav):
-                            assert question_sr == agent_sr, f"Question sample rate ({question_sr}) does not match agent sample rate ({agent_sr})"
+                        assert question_sr == agent_sr, f"Question sample rate ({question_sr}) does not match agent sample rate ({agent_sr})"
                         
                         if len(agent_audio_data.shape) > 1:
                             agent_audio_data = agent_audio_data[:, 0]
@@ -236,25 +261,25 @@ def create_shards(
                         cut.supervisions.append(agent_supervision)
 
                         # Process audio
-                        sample_rate = agent_recording.sampling_rate
-                        user_duration = user_recording.duration + turn_silence_sec
-                        agent_duration = agent_recording.duration
+            sample_rate = agent_recording.sampling_rate
+            user_duration = user_recording.duration + turn_silence_sec
+            agent_duration = agent_recording.duration
                         cur_user_audio = user_recording.load_audio()
-                        cur_agent_audio = agent_recording.load_audio()
+            cur_agent_audio = agent_recording.load_audio()
 
-                        silence_padding = np.zeros((1, int(turn_silence_sec * sample_rate)))
-                        user_audio_list.extend([cur_user_audio, silence_padding, np.zeros_like(cur_agent_audio)])
-                        agent_audio_list.extend([np.zeros_like(cur_user_audio), silence_padding, cur_agent_audio])
+            silence_padding = np.zeros((1, int(turn_silence_sec * sample_rate)))
+            user_audio_list.extend([cur_user_audio, silence_padding, np.zeros_like(cur_agent_audio)])
+            agent_audio_list.extend([np.zeros_like(cur_user_audio), silence_padding, cur_agent_audio])
 
-                        total_dur += user_duration + agent_duration
+            total_dur += user_duration + agent_duration
 
                     except Exception as e:
                         print(f"Error processing entry {entry_idx} in cut {j}: {str(e)}")
                         continue
 
                 # Process final audio
-                user_audio = np.concatenate(user_audio_list, axis=1)
-                agent_audio = np.concatenate(agent_audio_list, axis=1)
+        user_audio = np.concatenate(user_audio_list, axis=1)
+        agent_audio = np.concatenate(agent_audio_list, axis=1)
 
                 # Calculate the last assistant's end time
                 last_assistant_end = 0.0
