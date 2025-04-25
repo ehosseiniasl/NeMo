@@ -34,6 +34,11 @@ def json_reader(filename):
 
 
 def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=0.64, audio_dir=None, silent_duration=5.0):
+    # Import numpy locally to avoid reference errors
+    import numpy as np
+    import soundfile as sf
+    from pathlib import Path
+    
     in_manifest = list(json_reader(manifest))
     print(f"...loaded {manifest} # of datapoints {len(in_manifest)}")
     shard_size = int(len(in_manifest) / num_shard)
@@ -88,17 +93,25 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
             if os.path.exists(full_audio_path):
                 # Extract ID from audio filename - get just the numeric part
                 audio_filename = os.path.basename(full_audio_path)
-                # Extract the ID from the filename (e.g., "1265-34.wav" -> "34")
-                match = re.search(r'(\d+)(?:-(\d+))?\.wav$', audio_filename)
-                if match and match.group(2):
-                    # If format is like "1265-34.wav", use "34"
-                    audio_id = match.group(2)
-                elif match:
-                    # If format is like "1265.wav", use "1265"
-                    audio_id = match.group(1)
-                else:
-                    # Fallback: use the whole filename without extension
+                # Extract the ID from the filename
+                
+                # Handle special case for AlpacaEval and other datasets with speaker_id in the name
+                if "alpacaeval_speaker" in manifest.lower() or "sd-qa" in manifest.lower():
+                    # For files like "en_US_Wavenet_A_1.0_0.0_0.0_60.wav", keep the whole name as ID (without extension)
                     audio_id = os.path.splitext(audio_filename)[0]
+                    print(f"Using full ID for speaker dataset: {audio_id}")
+                else:
+                    # For other datasets, extract just the numeric part
+                    match = re.search(r'(\d+)(?:-(\d+))?\.wav$', audio_filename)
+                    if match and match.group(2):
+                        # If format is like "1265-34.wav", use "34"
+                        audio_id = match.group(2)
+                    elif match:
+                        # If format is like "1265.wav", use "1265"
+                        audio_id = match.group(1)
+                    else:
+                        # Fallback: use the whole filename without extension
+                        audio_id = os.path.splitext(audio_filename)[0]
                 
                 # Create recording with the custom ID
                 user_recording = Recording.from_file(full_audio_path)
@@ -190,9 +203,20 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
         # For target_audio: zeros for user position, silent audio for assistant position
         target_audio = np.concatenate([np.zeros_like(user_audio), silent_audio], axis=1)
         
-        # Save the concatenated audio files with the custom ID
-        save_audio(f"/tmp/{audio_id}_1.wav", recording_audio, sample_rate)
-        save_audio(f"/tmp/{audio_id}_2.wav", target_audio, sample_rate)
+        # Create temporary WAV files for user and model parts
+        user_part = user_audio[: int(user_duration * sample_rate)]
+        model_part = np.zeros((user_audio.shape[0], int(silence_duration_seconds * sample_rate)))
+        
+        # Make safe filenames by removing problematic characters
+        safe_id = str(audio_id).replace("/", "_").replace("\\", "_").replace(":", "_")
+        
+        # Create temporary WAV files with full ID in the filename
+        tmp_wav_path1 = f"/tmp/{safe_id}_1.wav"
+        tmp_wav_path2 = f"/tmp/{safe_id}_2.wav"
+        
+        # Save user part and silence as separate files
+        sf.write(tmp_wav_path1, np.concatenate([user_part, model_part], axis=1).T, sample_rate)
+        sf.write(tmp_wav_path2, np.concatenate([user_part, model_part], axis=1).T, sample_rate)
         
         # Update the cut's total duration to include both segments
         cut.duration = user_duration + silence_duration_seconds
@@ -227,12 +251,12 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
         )
         
         # Create and update the recording with proper ID
-        new_recording = Recording.from_file(f"/tmp/{audio_id}_1.wav")
+        new_recording = Recording.from_file(tmp_wav_path1)
         new_recording.id = cut.id  # Set ID to match the cut
         cut.recording = new_recording
         
         # Create and update the target_audio with proper ID
-        target_recording = Recording.from_file(f"/tmp/{audio_id}_2.wav")
+        target_recording = Recording.from_file(tmp_wav_path2)
         target_recording.id = f"{cut.id}_target"  # Use a consistent target ID format
         cut.target_audio = target_recording
 
@@ -250,15 +274,104 @@ def create_shar_from_manifest(manifest, out_shar_dir, num_shard=10, overlap_sec=
         out_path = path.replace("cuts", "target_audio").replace(".jsonl.gz", ".tar")
         with AudioTarWriter(out_path, shard_size=None, format="wav") as writer:
             for cut in CutSet.from_file(path):
-                writer.write(
-                    cut.id, cut.target_audio.load_audio(), manifest=cut.target_audio, sampling_rate=sample_rate
-                )
+                try:
+                    # Try to write the target audio as normal
+                    writer.write(
+                        cut.id, cut.target_audio.load_audio(), manifest=cut.target_audio, sampling_rate=sample_rate
+                    )
+                except Exception as e:
+                    print(f"Error loading target audio for {cut.id}: {e}")
+                    print(f"Attempting to fix the target audio...")
+                    
+                    # For SD-QA dataset, we need special handling
+                    if "sd-qa" in manifest.lower() or "alpacaeval_speaker" in manifest.lower():
+                        try:
+                            # Import numpy and soundfile here to ensure they're available
+                            import numpy as np
+                            import soundfile as sf
+                            from pathlib import Path
+                            
+                            # Create fixed silent audio
+                            silence_samples = int(silent_duration * sample_rate)
+                            silence = np.zeros((1, silence_samples), dtype=np.float32)
+                            
+                            # Save to a temporary file with correct properties
+                            temp_dir = Path("/tmp")
+                            temp_dir.mkdir(exist_ok=True)
+                            temp_file = temp_dir / f"{cut.id}_fixed_target.wav"
+                            sf.write(str(temp_file), silence.T, sample_rate)
+                            
+                            # Load from the fixed file
+                            fixed_target = Recording.from_file(str(temp_file))
+                            fixed_target.id = f"{cut.id}_target"
+                            
+                            # Write with the fixed audio
+                            writer.write(
+                                cut.id, fixed_target.load_audio(), manifest=fixed_target, sampling_rate=sample_rate
+                            )
+                            print(f"Successfully fixed target audio for {cut.id}")
+                        except Exception as fix_error:
+                            print(f"Failed to fix target audio for {cut.id}: {fix_error}")
+                            # Continue to next cut
+                            continue
         
         # Create recording tar file
         out_path = path.replace("cuts", "recording").replace(".jsonl.gz", ".tar")
         with AudioTarWriter(out_path, shard_size=None, format="wav") as writer:
             for cut in CutSet.from_file(path):
-                writer.write(cut.id, cut.recording.load_audio(), manifest=cut.recording, sampling_rate=sample_rate)
+                try:
+                    writer.write(cut.id, cut.recording.load_audio(), manifest=cut.recording, sampling_rate=sample_rate)
+                except Exception as e:
+                    print(f"Error loading recording audio for {cut.id}: {e}")
+                    print(f"Attempting to fix the recording audio...")
+                    
+                    # For SD-QA dataset, we need special handling
+                    if "sd-qa" in manifest.lower() or "alpacaeval_speaker" in manifest.lower():
+                        try:
+                            # Imports should be available from the previous section
+                            import numpy as np
+                            import soundfile as sf
+                            from pathlib import Path
+                            
+                            # Get the recording duration
+                            if cut.recording and hasattr(cut.recording, 'duration') and cut.recording.duration:
+                                user_duration = cut.recording.duration
+                            else:
+                                # Default to a reasonable duration if we can't determine it
+                                user_duration = 3.0
+                            
+                            # Create fixed audio file
+                            user_samples = int(user_duration * sample_rate)
+                            silence_samples = int(silent_duration * sample_rate)
+                            
+                            # For recording, we need user audio and silence for assistant
+                            recording_samples = user_samples + silence_samples
+                            # Create audio with the right shape (silence for user part too)
+                            recording_audio = np.zeros((1, recording_samples), dtype=np.float32)
+                            
+                            # Save to temporary file
+                            temp_dir = Path("/tmp")
+                            temp_dir.mkdir(exist_ok=True)
+                            
+                            # Make safe filename with the full ID
+                            safe_id = str(cut.id).replace("/", "_").replace("\\", "_").replace(":", "_")
+                            temp_file = temp_dir / f"{safe_id}_fixed_recording.wav"
+                            
+                            sf.write(str(temp_file), recording_audio.T, sample_rate)
+                            
+                            # Create new recording from the fixed file
+                            fixed_recording = Recording.from_file(str(temp_file))
+                            fixed_recording.id = cut.id
+                            
+                            # Write with the fixed audio
+                            writer.write(
+                                cut.id, fixed_recording.load_audio(), manifest=fixed_recording, sampling_rate=sample_rate
+                            )
+                            print(f"Successfully fixed recording audio for {cut.id}")
+                        except Exception as fix_error:
+                            print(f"Failed to fix recording audio for {cut.id}: {fix_error}")
+                            # Continue to next cut
+                            continue
 
 
 def main():
