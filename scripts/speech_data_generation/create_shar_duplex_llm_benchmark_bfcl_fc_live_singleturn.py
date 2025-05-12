@@ -209,10 +209,13 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
                 # text=convs[i]["instruction"],
                 text=user_transcript,
                 custom={'function': user_function},
-                speaker=convs[0]["from"],
+                speaker="user", #convs[0]["from"],
                 language="EN",
             ),
         )
+        
+        # Assert that supervisions[1] is from 'user'
+        assert cut.supervisions[1].speaker == "user", f"Expected supervision[1].speaker to be 'user', got '{cut.supervisions[1].speaker}'"
 
         # total_duration += user_duration 
                     # ipdb.set_trace()
@@ -227,7 +230,7 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
         #     cur_user_audio = None
         
         if user_duration > 0:
-            total_duration += (user_duration +turn_silence_sec)
+            total_duration += (user_duration + turn_silence_sec)
 
         
         # try:
@@ -260,6 +263,7 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
             assistant_function = ""
         assistant_transcript = ""
         assistant_path = "" 
+        # Assistant duration should be 0 according to the required format
         assistant_duration = 0
 
         cut.supervisions.append(
@@ -267,8 +271,7 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
                 id=cut.id,
                 recording_id=cut.id,
                 start=total_duration,
-                duration=assistant_duration, #cut.recording.duration,
-                # text=convs[i + 1]["transcript"],
+                duration=assistant_duration,
                 text=assistant_transcript,
                 custom={'function': assistant_function},
                 speaker="assistant",
@@ -278,13 +281,7 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
 
         total_duration += assistant_duration
 
-        # ipdb.set_trace()
-        # if assistant_path != '':
-        #     # agent_duration = Recording.from_file(assistant_path).duration
-        #     cur_agent_audio = Recording.from_file(assistant_path).load_audio()
-        #     cur_user_agent_added = False
-        # elif cur_user_agent_added:
-        #     cur_agent_audio = None
+        # Create silent agent audio of the same length as user audio
         cur_agent_audio = np.zeros_like(cur_user_audio)
 
         if cur_user_audio is not None and cur_agent_audio is not None and not cur_user_agent_added:
@@ -293,20 +290,19 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
                 if overlap_samples > 0:
                     user_audio = user_audio[:, :-overlap_samples]
                 total_dur -= overlap_sec
-            user_audio = np.concatenate([user_audio, cur_user_audio, silence_padding, 0 * cur_agent_audio], axis=1)
-            user_duration += turn_silence_sec
-            # total_duration += turn_silence_sec
-
+            
+            # Just use the user audio directly without adding additional silence or zeros
+            # This ensures the audio duration matches the user's actual speech
+            user_audio = np.concatenate([user_audio, cur_user_audio], axis=1)
+            
+            # For agent audio, just use zeros of the exact same length as user_audio
             if i != 0:
                 if overlap_samples > 0:
-                    agent_audio = np.concatenate([agent_audio, 0 * cur_user_audio[:, :-overlap_samples], silence_padding, cur_agent_audio], axis=1)
+                    agent_audio = np.concatenate([agent_audio, np.zeros_like(cur_user_audio[:, :-overlap_samples])], axis=1)
                 else:
-                    agent_audio = np.concatenate([agent_audio, 0 * cur_user_audio, silence_padding, cur_agent_audio], axis=1)
+                    agent_audio = np.concatenate([agent_audio, np.zeros_like(cur_user_audio)], axis=1)
             else:
-                agent_audio = np.concatenate([agent_audio, 0 * cur_user_audio, silence_padding, cur_agent_audio], axis=1)
-
-            # total_duration += assistant_duration
-            # total_duration += user_duration + agent_duration
+                agent_audio = np.concatenate([agent_audio, np.zeros_like(cur_user_audio)], axis=1)
 
             cur_user_agent_added = True
             cur_user_audio = None
@@ -321,13 +317,15 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
         #     cut.target_audios.append(Recording.from_file(assistant_audio))
         # else:
         #     cut.target_audios.append(Recording(sources=[], id='', sampling_rate=0, num_samples=1, duration=0))
+        
+        # Set the cut duration to match the total audio duration
         cut.duration = total_duration
         cut.start = 0.0
+        
+        # Ensure user and agent audio are of equal length
         try:
-            assert user_audio.shape == agent_audio.shape
+            assert user_audio.shape == agent_audio.shape, f"User audio shape {user_audio.shape} != agent audio shape {agent_audio.shape}"
         except:
-            # ipdb.set_trace()
-            # assert user_audio.shape < agent_audio.shape
             unequal += 1
             diff = agent_audio.shape[1] - user_audio.shape[1]
             if diff > 0:
@@ -335,38 +333,69 @@ def create_shar_from_manifest(manifest, out_shar_dir, audio_dir, num_shard=10, o
             else:
                 agent_audio = np.concatenate([agent_audio, np.zeros((1, int(np.abs(diff))))], axis=1) # add silence
             # ipdb.set_trace()
-            assert user_audio.shape == agent_audio.shape
+            assert user_audio.shape == agent_audio.shape, "Audio shapes still don't match after adjustment"
 
+        # Save the audio files
         save_audio(f"/tmp/u{j}1.wav", user_audio, sample_rate)
-        cut.recording = Recording.from_file(f"/tmp/u{j}1.wav")
         save_audio(f"/tmp/u{j}2.wav", agent_audio, sample_rate)
-        cut.target_audio = Recording.from_file(f"/tmp/u{j}2.wav")
-        # if cut.id == "glaive-functioncalling-v2+toolcall+respond_synthesized_dial_4_turn_3_Assistant_audio-4":
-        #     import ipdb; ipdb.set_trace()
-
-        ## method 2
-        # user_stream = BytesIO()
-        # agent_stream = BytesIO()
-        # save_audio(dest=user_stream, src=user_audio, sampling_rate=sample_rate, format="wav")
-        # save_audio(dest=agent_stream, src=agent_audio, sampling_rate=sample_rate, format="wav")
-
-        # user_stream.seek(0)
-        # agent_stream.seek(0)
-        # # # import ipdb; ipdb.set_trace()
-        # cut.recording = Recording.from_bytes(user_stream.getvalue(), f"{cut.id}_user")
-        # cut.target_audio = Recording.from_bytes(agent_stream.getvalue(), f"{cut.id}_agent")
-
-        ## method 3:
-        # Save the in-memory audio to temporary files
-        # with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_user_file:
-        #     temp_user_file.write(user_stream.getvalue())
-        #     temp_user_path = temp_user_file.name
-
-        # with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_agent_file:
-        #     temp_agent_file.write(agent_stream.getvalue())
-        #     temp_agent_path = temp_agent_file.name
-        # cut.recording = Recording.from_file(temp_user_path, f"{cut.id}_user")
-        # cut.target_audio = Recording.from_file(temp_agent_path, f"{cut.id}_agent")
+        
+        # Load the recordings and ensure durations match
+        user_recording = Recording.from_file(f"/tmp/u{j}1.wav")
+        agent_recording = Recording.from_file(f"/tmp/u{j}2.wav")
+        
+        # Verify that durations match
+        assert abs(user_recording.duration - agent_recording.duration) < 1e-6, f"Recording durations don't match: {user_recording.duration} vs {agent_recording.duration}"
+        
+        cut.recording = user_recording
+        cut.target_audio = agent_recording
+        
+        # IMPORTANT: Set the cut duration to match exactly the recording duration
+        # This ensures the overall cut duration is correct
+        cut.duration = cut.recording.duration
+        
+        # Also update total_duration to match the actual recording duration
+        total_duration = cut.recording.duration
+            
+        # Since there are 3 supervisions (system, user, assistant), assistant is at index 2
+        # The assistant supervision needs start time updated but duration remains 0
+        
+        # User supervision should be the exact duration of the user audio
+        cut.supervisions[1].duration = cut.recording.duration
+        cut.supervisions[1].start = 0  # Ensure user starts at the beginning
+        
+        # Set assistant start time to the end of the recording
+        user_end_time = cut.recording.duration
+        
+        # Remove the old assistant supervision and add an updated one with duration 0
+        old_assistant_supervision = cut.supervisions.pop()
+        cut.supervisions.append(
+            SupervisionSegment(
+                id=old_assistant_supervision.id,
+                recording_id=old_assistant_supervision.recording_id,
+                start=user_end_time,
+                duration=0, # Keep assistant duration as 0
+                text=old_assistant_supervision.text,
+                custom=old_assistant_supervision.custom,
+                speaker=old_assistant_supervision.speaker,
+                language=old_assistant_supervision.language,
+            ),
+        )
+        
+        # Double check that all the durations are consistent
+        assert abs(cut.duration - cut.recording.duration) < 1e-6, f"Cut duration {cut.duration} doesn't match recording duration {cut.recording.duration}"
+        assert abs(cut.duration - cut.target_audio.duration) < 1e-6, f"Cut duration {cut.duration} doesn't match target audio duration {cut.target_audio.duration}"
+        assert abs(cut.supervisions[1].duration - cut.recording.duration) < 1e-6, f"User supervision duration {cut.supervisions[1].duration} doesn't match recording duration {cut.recording.duration}"
+        assert cut.supervisions[1].start == 0, f"User supervision doesn't start at 0: {cut.supervisions[1].start}"
+        assert cut.supervisions[2].start == cut.recording.duration, f"Assistant supervision doesn't start at the end of recording: {cut.supervisions[2].start} vs {cut.recording.duration}"
+        assert cut.supervisions[2].duration == 0, f"Assistant supervision duration is not 0: {cut.supervisions[2].duration}"
+        
+        # Print duration details for debugging
+        print(f"Cut ID: {cut.id}")
+        print(f"Cut duration: {cut.duration}")
+        print(f"Recording duration: {cut.recording.duration}")
+        print(f"Target audio duration: {cut.target_audio.duration}")
+        print(f"User supervision: start={cut.supervisions[1].start}, duration={cut.supervisions[1].duration}")
+        print(f"Assistant supervision: start={cut.supervisions[2].start}, duration={cut.supervisions[2].duration}")
 
     print(f"unequal examples: {unequal}")
 
